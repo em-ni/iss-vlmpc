@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.linalg import solve_discrete_are
 
 # Import exactly as requested
-from model.train_sim import StatePredictor, TrainingConfig as TrainConfig
+from model.train_robot import StatePredictor, TrainingConfig as TrainConfig
 
 # --- Configuration ---
 class MPCConfig:
@@ -625,6 +625,7 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
     history_x_target = [x_target]
     n_steps = int(MPCConfig.SIM_TIME / MPCConfig.DT)
     sim_times = []
+    step_times = []
     
     if mode == 'tt':
         # Generate a reference trajectory of final_time/simulation_params['mpc_dt'] steps
@@ -643,7 +644,11 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
                 x_target = reference_trajectory[-1]
 
         # Get MPC control input
+        start_step = time.time()
         u_mpc = mpc.step(x_target, x_current)
+        end_step = time.time()
+        step_times.append(end_step - start_step)
+
         if u_mpc is None:
             print(f"MPC failed at step {i}")
             break
@@ -666,13 +671,12 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
     
     # Print timing stats
     total_sim_time = sum(sim_times)
-    mpc_time = end - start - total_sim_time
+    total_step_time = sum(step_times)
     print(f"\nSimulated {MPCConfig.SIM_TIME:.1f}s in {end - start:.2f} seconds")
     print(f"Total simulation time: {total_sim_time:.2f} seconds.")
     print(f"Avg simulation time per step: {1000 * total_sim_time / n_steps:.2f} ms.")
-    print(f"Total MPC time: {mpc_time:.2f} seconds")
-    print(f"Avg MPC time per step: {1000 * mpc_time / n_steps:.2f} ms.")
-    
+    print(f"Avg MPC time per step: {1000 * total_step_time / n_steps:.2f} ms.")
+
     # Plot results
     mpc.history_x = history_x  # Set for plotting
     mpc.history_u = history_u  # Set for plotting

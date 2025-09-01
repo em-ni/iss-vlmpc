@@ -1,4 +1,4 @@
-# train_robot.py
+# train_robot.py - Improved version to prevent overfitting
 import os
 import sys
 import pandas as pd
@@ -6,28 +6,47 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+# from functorch import vmap, jacrev, hessian # deprecated
+from torch.func import vmap, jacrev, hessian
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import joblib
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import argparse
+import matplotlib.pyplot as plt
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # --- Training Configuration ---
 class TrainingConfig:
-    
-    REAL_DATASET_PATH = "model/data/output_exp_2025-07-22_12-23-07.csv"
-    MODEL_PATH = "model/data/real_rob_f.pth"
-    INPUT_SCALER_PATH = "model/data/real_rob_i_scaler.joblib"
-    OUTPUT_SCALER_PATH = "model/data/real_rob_o_scaler.joblib"
-    PLOT_OUTPUT_PATH = "model/data/real_rob_perf.png"
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+
+    REAL_DATASET_PATH = os.path.join(BASE_DIR, "data", "output_exp_2025-07-22_12-23-07.csv")
+    MODEL_PATH = os.path.join(BASE_DIR, "data", "real_rob_f.pth")
+    INPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_i_scaler.joblib")
+    OUTPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_o_scaler.joblib")
+    PLOT_OUTPUT_PATH = os.path.join(BASE_DIR, "data", "real_rob_perf.png")
     
     NUM_EPOCHS = 100
+    BATCH_SIZE = 32
     TEST_SIZE = 0.2
     VAL_SIZE = 0.2
-    BATCH_SIZE = 32
-    LEARNING_RATE = 0.001
+    LEARNING_RATE = 1e-3
+    WEIGHT_DECAY = 1e-5
 
 class StatePredictor(nn.Module):
-    """A simple feed-forward neural network for state prediction."""
+    """
+    A right-sized neural network for state prediction.
+    Notes: the model needs to be at least C1 continuous because:
+        - uniform continuity assumption 4 (Seel et al., "Neural Network-Based...")
+        - differentiability requirement for jacobian computation ("Salzmann et al., "Real-time Neural MPC")
+        - eventually C2 for hessian computation (if using second-order approximation)
+    
+    Derivatives:
+        - ReLU: ReLU(x) -> Heaviside(x) (not differentiable at 0)
+        - Tanh: tanh(x) -> sech^2(x) -> -2sech^2(x) * tanh(x)
+        - SiLU: x * sigmoid(x) -> sigmoid(x) + x * sigmoid'(x) -> sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+    """
     def __init__(self, input_dim, output_dim):
         super(StatePredictor, self).__init__()
         self.network = nn.Sequential(
@@ -79,7 +98,7 @@ class RobotStateDataset(Dataset):
 
 def load_and_prepare_data(filepath):
     """
-    Loads data, calculates dt, and creates pairs where X = [u_k, x_k, dt]
+    Loads data from trajectories and creates pairs where X = [u_k, x_k, dt]
     x_k = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
     y = [x_k+1].
     """
@@ -96,7 +115,7 @@ def load_and_prepare_data(filepath):
 
     X_list, y_list = [], []
     
-    print("Processing trajectories (without acceleration)...")
+    print("Processing trajectories...")
     for traj_id, group in df.groupby('trajectory'):
         if len(group) < 2:
             continue
@@ -123,10 +142,11 @@ def load_and_prepare_data(filepath):
     print("Finished processing data.")
     return X, y
 
+
 def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device):
     """The main training loop."""
     criterion = nn.MSELoss()  # Mean Squared Error is good for regression
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=TrainingConfig.WEIGHT_DECAY)
     
     model.to(device)
     
@@ -172,13 +192,53 @@ def train_model(model, train_loader, val_loader, num_epochs, learning_rate, devi
     print("Training finished.")
     return history
 
+
+def plot_predictions(y_true, y_pred, save_path):
+    """Generates Predicted vs. Actual plots and saves the figure to a file."""
+    state_labels = [
+        'Tip Position X', 'Tip Position Y', 'Tip Position Z',
+        'Tip Velocity X', 'Tip Velocity Y', 'Tip Velocity Z'
+    ]
+    
+    num_states = y_true.shape[1]
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    axes = axes.flatten()
+
+    for i in range(num_states):
+        ax = axes[i]
+        # Use a smaller subset of points for plotting if the test set is very large
+        sample_size = min(len(y_true), 2000)
+        indices = np.random.choice(len(y_true), sample_size, replace=False)
+        
+        ax.scatter(y_true[indices, i], y_pred[indices, i], alpha=0.5, s=15, edgecolors='k', linewidths=0.5)
+        
+        lims = [
+            np.min([ax.get_xlim(), ax.get_ylim()]),
+            np.max([ax.get_xlim(), ax.get_ylim()]),
+        ]
+        ax.plot(lims, lims, 'r--', linewidth=2, label='Perfect Prediction')
+        
+        ax.set_xlabel("Actual Values", fontsize=12)
+        ax.set_ylabel("Predicted Values", fontsize=12)
+        ax.set_title(state_labels[i], fontsize=14)
+        ax.legend()
+        ax.grid(True)
+        
+    plt.tight_layout(pad=3.0)
+    plt.suptitle("Predicted vs. Actual State Values on Test Set", fontsize=20, y=1.02)
+    
+    # Save the plot to a file.
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nPlot saved successfully to: {save_path}")
+    plt.close(fig) # Close the figure to free up memory
+
 # --- Main Execution ---
 if __name__ == "__main__":
     
     # Ensure directories exist
     os.makedirs(os.path.dirname(TrainingConfig.MODEL_PATH), exist_ok=True)
 
-    # --- Create Data and Load ---
+    # --- Load Data ---
     try:
         X, y = load_and_prepare_data(TrainingConfig.REAL_DATASET_PATH)
     except FileNotFoundError:
@@ -189,6 +249,7 @@ if __name__ == "__main__":
         print(f"Error during data preparation: {e}")
         sys.exit()
 
+    print(f"Total samples loaded: {len(X)}")
     print(f"Shape of input features (X): {X.shape}")
     print(f"Shape of target features (y): {y.shape}")
     
@@ -199,6 +260,13 @@ if __name__ == "__main__":
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_val, y_train_val, test_size=TrainingConfig.VAL_SIZE / (1 - TrainingConfig.TEST_SIZE), random_state=42
     )
+
+    print(f"Training samples:   {len(X_train)}")
+    print(f"Validation samples: {len(X_val)}")
+    print(f"Test samples:       {len(X_test)}")
+    
+    if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
+        raise ValueError("One of the data splits resulted in zero samples. Check your data size and split ratios.")
 
     # --- Scale Data ---
     print("\nScaling data...")
@@ -239,3 +307,28 @@ if __name__ == "__main__":
     print(f"Model saved to {TrainingConfig.MODEL_PATH}")
     print(f"Input scaler saved to {TrainingConfig.INPUT_SCALER_PATH}")
     print(f"Output scaler saved to {TrainingConfig.OUTPUT_SCALER_PATH}")
+    
+    # --- Evaluation on Test Set (Single Step Predictions) ---
+    print("\n--- Evaluating on Test Set (Single Step Predictions) ---")
+    model.eval()
+    X_test_scaled = input_scaler.transform(X_test)
+    X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
+
+    with torch.no_grad():
+        predictions_scaled = model(X_test_tensor).cpu().numpy()
+
+    predictions = output_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+    mae = mean_absolute_error(y_test, predictions)
+    r2 = r2_score(y_test, predictions)
+
+    print("\n--- Performance Metrics (Single Step Predictions) ---")
+    print(f"Mean Squared Error (MSE): {mse:.6f}")
+    print(f"Mean Absolute Error (MAE): {mae:.6f}")
+    print(f"R-squared (R²):           {r2:.4f}")
+
+    plot_predictions(y_test, predictions, TrainingConfig.PLOT_OUTPUT_PATH)
+    
+    print(f"\nAll evaluation plots saved to: {os.path.dirname(TrainingConfig.PLOT_OUTPUT_PATH)}")
+    print("Training and evaluation completed successfully!")
