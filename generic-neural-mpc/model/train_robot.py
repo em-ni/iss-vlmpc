@@ -98,7 +98,7 @@ class RobotStateDataset(Dataset):
 
 def load_and_prepare_data(filepath):
     """
-    Loads data from trajectories and creates pairs where X = [u_k, x_k, dt]
+    Loads data from trajectories and creates pairs where X = [u_k, x_k]
     x_k = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
     y = [x_k+1].
     """
@@ -123,14 +123,8 @@ def load_and_prepare_data(filepath):
         current_features = group[CURRENT_FEATURES].iloc[:-1].values
         next_state = group[STATE_COLS].iloc[1:].values
         
-        times_ms = group['T'].values
-        dt_seconds = (times_ms[1:] - times_ms[:-1]) / 1000.0
-        dt_seconds_col = dt_seconds.reshape(-1, 1)
-        
-        # X = [u_k, x_k, dt]
-        X_with_dt = np.hstack([current_features, dt_seconds_col])
-        
-        X_list.append(X_with_dt)
+        # X = [u_k, x_k] (no dt)
+        X_list.append(current_features)
         y_list.append(next_state)
 
     if not X_list:
