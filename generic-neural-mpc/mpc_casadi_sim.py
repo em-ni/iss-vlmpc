@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from scipy.linalg import solve_discrete_are
 
 # Import exactly as requested
-from model.train_robot import StatePredictor, TrainingConfig as TrainConfig
+from model.train_sim import StatePredictor, TrainingConfig as TrainConfig
 
 # --- Configuration ---
 class MPCConfig:

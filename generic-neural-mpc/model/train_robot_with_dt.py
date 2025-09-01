@@ -22,10 +22,10 @@ class TrainingConfig:
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
     REAL_DATASET_PATH = os.path.join(BASE_DIR, "data", "output_exp_2025-07-22_12-23-07.csv")
-    MODEL_PATH = os.path.join(BASE_DIR, "data", "real_rob_f.pth")
-    INPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_i_scaler.joblib")
-    OUTPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_o_scaler.joblib")
-    PLOT_OUTPUT_PATH = os.path.join(BASE_DIR, "data", "real_rob_perf.png")
+    MODEL_PATH = os.path.join(BASE_DIR, "data", "real_rob_f_dt.pth")
+    INPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_dt_i_scaler.joblib")
+    OUTPUT_SCALER_PATH = os.path.join(BASE_DIR, "data", "real_rob_o_dt_scaler.joblib")
+    PLOT_OUTPUT_PATH = os.path.join(BASE_DIR, "data", "real_rob_dt_perf.png")
     
     NUM_EPOCHS = 100
     BATCH_SIZE = 32
@@ -98,7 +98,7 @@ class RobotStateDataset(Dataset):
 
 def load_and_prepare_data(filepath):
     """
-    Loads data from trajectories and creates pairs where X = [u_k, x_k]
+    Loads data from trajectories and creates pairs where X = [u_k, x_k, dt]
     x_k = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
     y = [x_k+1].
     """
@@ -123,8 +123,14 @@ def load_and_prepare_data(filepath):
         current_features = group[CURRENT_FEATURES].iloc[:-1].values
         next_state = group[STATE_COLS].iloc[1:].values
         
-        # X = [u_k, x_k] (no dt)
-        X_list.append(current_features)
+        # Calculate dt for each step - convert from ms to seconds
+        times_ms = group['T'].values
+        dt_seconds = (times_ms[1:] - times_ms[:-1]) / 1000.0
+        dt_seconds_col = dt_seconds.reshape(-1, 1)
+        
+        # X = [u_k, x_k, dt]
+        current_features_with_dt = np.hstack([current_features, dt_seconds_col])
+        X_list.append(current_features_with_dt)
         y_list.append(next_state)
 
     if not X_list:
@@ -403,7 +409,7 @@ class NeuralNetworkApproximator:
 
 
 def evaluate_approximation_rollouts(model, X_test_orig, y_test_orig, input_scaler, output_scaler, device,
-                                   approximation_order=1, horizons=[1, 5, 10, 20, 40], num_rollouts=100):
+                                   approximation_order=1, horizons=[1, 5, 10, 20, 40, 80, 160], num_rollouts=100):
     """
     Evaluates neural network approximations on multi-horizon rollouts.
     
@@ -416,7 +422,7 @@ def evaluate_approximation_rollouts(model, X_test_orig, y_test_orig, input_scale
     # Setup approximator
     approximator = NeuralNetworkApproximator(model, input_scaler, output_scaler, device)
     
-    # X = [volumes_k (3), state_k (6)] -> state is columns 3 to 9
+    # X = [volumes_k (3), state_k (6), dt (1)] -> state is columns 3 to 9
     num_state_dims = y_test_orig.shape[1]
     state_start_col = 3  # Assumes 3 volume inputs
     state_end_col = state_start_col + num_state_dims
@@ -453,9 +459,10 @@ def evaluate_approximation_rollouts(model, X_test_orig, y_test_orig, input_scale
                 for i in range(horizon):
                     # Use the actual control input from the test data
                     control_input = X_test_orig[start_idx + i, :state_start_col]
+                    dt_value = X_test_orig[start_idx + i, -1]  # dt is the last column
                     
-                    # Combine current state and control input
-                    x_and_u = np.concatenate([control_input, current_state])
+                    # Combine current state, control input, and dt
+                    x_and_u = np.concatenate([control_input, current_state, [dt_value]])
                     x_and_u_torch = torch.tensor(x_and_u, dtype=torch.float32, device=device)
                     
                     # Recompute linearization point if needed
@@ -509,7 +516,7 @@ def evaluate_approximation_rollouts(model, X_test_orig, y_test_orig, input_scale
 
 
 def evaluate_multi_horizon_rollouts(model, X_test_orig, y_test_orig, input_scaler, output_scaler, device, 
-                                    horizons=[1, 5, 10, 20, 40], num_rollouts=100):
+                                    horizons=[1, 5, 10, 20, 40, 80, 160], num_rollouts=100):
     """
     Performs multiple short rollouts for various horizon lengths to evaluate
     prediction error accumulation. This is much more representative of MPC usage.
@@ -517,7 +524,7 @@ def evaluate_multi_horizon_rollouts(model, X_test_orig, y_test_orig, input_scale
     print("\n--- Evaluating on Test Set (Multi-Horizon Rollouts) ---")
     model.eval()
 
-    # X = [volumes_k (3), state_k (6)] -> state is columns 3 to 9
+    # X = [volumes_k (3), state_k (6), dt (1)] -> state is columns 3 to 9
     num_state_dims = y_test_orig.shape[1]
     state_start_col = 3 # Assumes 3 volume inputs
     state_end_col = state_start_col + num_state_dims
@@ -551,9 +558,10 @@ def evaluate_multi_horizon_rollouts(model, X_test_orig, y_test_orig, input_scale
                 for i in range(horizon):
                     # Use the actual control input from the test data
                     control_input = X_test_orig[start_idx + i, :state_start_col]
+                    dt_value = X_test_orig[start_idx + i, -1]  # dt is the last column
                     
-                    # Combine current state and control input
-                    x_and_u = np.concatenate([control_input, current_state])
+                    # Combine current state, control input, and dt
+                    x_and_u = np.concatenate([control_input, current_state, [dt_value]])
                     x_and_u_scaled = input_scaler.transform([x_and_u])
                     x_and_u_tensor = torch.tensor(x_and_u_scaled, dtype=torch.float32).to(device)
                     
@@ -712,7 +720,7 @@ if __name__ == "__main__":
             output_scaler,
             device,
             approximation_order=1,
-            horizons=[1, 5, 10, 20, 40],
+            horizons=[1, 5, 10, 20, 40, 80, 160],
             num_rollouts=1000
         )
         
@@ -725,7 +733,7 @@ if __name__ == "__main__":
             output_scaler,
             device,
             approximation_order=2,
-            horizons=[1, 5, 10, 20, 40],
+            horizons=[1, 5, 10, 20, 40, 80, 160],
             num_rollouts=1000
         )
         
