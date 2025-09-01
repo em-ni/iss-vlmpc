@@ -34,9 +34,10 @@ class TrainingConfig:
     LEARNING_RATE = 1e-3
     WEIGHT_DECAY = 1e-5
 
-class StatePredictor(nn.Module):
+
+class BaselineStatePredictor(nn.Module):
     """
-    A right-sized neural network for state prediction.
+    A right-sized neural network for state prediction (Baseline).
     Notes: the model needs to be at least C1 continuous because:
         - uniform continuity assumption 4 (Seel et al., "Neural Network-Based...")
         - differentiability requirement for jacobian computation ("Salzmann et al., "Real-time Neural MPC")
@@ -48,19 +49,185 @@ class StatePredictor(nn.Module):
         - SiLU: x * sigmoid(x) -> sigmoid(x) + x * sigmoid'(x) -> sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
     """
     def __init__(self, input_dim, output_dim):
-        super(StatePredictor, self).__init__()
+        super(BaselineStatePredictor, self).__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, 128),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(128, 128),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(128, 128),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(128, output_dim)
         )
     
     def forward(self, x):
         return self.network(x)
+
+
+class ResidualBlock(nn.Module):
+    """Residual block with skip connections for better gradient flow."""
+    def __init__(self, dim):
+        super(ResidualBlock, self).__init__()
+        self.linear1 = nn.Linear(dim, dim)
+        self.linear2 = nn.Linear(dim, dim)
+        
+    def forward(self, x):
+        residual = x
+        x = torch.tanh(self.linear1(x))
+        x = torch.tanh(self.linear2(x))
+        return x + residual  # Skip connection
+
+
+class ResidualStatePredictor(nn.Module):
+    """State predictor with residual connections for better training stability."""
+    def __init__(self, input_dim, output_dim):
+        super(ResidualStatePredictor, self).__init__()
+        self.input_proj = nn.Linear(input_dim, 128)
+        
+        # Residual blocks
+        self.block1 = ResidualBlock(128)
+        self.block2 = ResidualBlock(128)
+        self.block3 = ResidualBlock(128)
+        
+        self.output_proj = nn.Linear(128, output_dim)
+        
+    def forward(self, x):
+        x = torch.tanh(self.input_proj(x))
+        x = self.block1(x)
+        x = self.block2(x) 
+        x = self.block3(x)
+        return self.output_proj(x)
+
+
+class PhysicsInformedPredictor(nn.Module):
+    """Physics-informed architecture separating position and velocity dynamics."""
+    def __init__(self, input_dim, output_dim):
+        super(PhysicsInformedPredictor, self).__init__()
+        # Shared feature extraction
+        self.shared = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.Tanh(),
+            nn.Linear(128, 128),
+            nn.Tanh()
+        )
+        
+        # Position dynamics (3 outputs: tip_x, tip_y, tip_z)
+        self.position_net = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, 3)
+        )
+        
+        # Velocity dynamics (3 outputs: tip_velocity_x, tip_velocity_y, tip_velocity_z)  
+        self.velocity_net = nn.Sequential(
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, 3)
+        )
+        
+    def forward(self, x):
+        features = self.shared(x)
+        pos_pred = self.position_net(features)
+        vel_pred = self.velocity_net(features)
+        return torch.cat([pos_pred, vel_pred], dim=-1)
+
+
+class WideStatePredictor(nn.Module):
+    """Wider network for better expressiveness."""
+    def __init__(self, input_dim, output_dim):
+        super(WideStatePredictor, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 256),
+            nn.Tanh(),
+            nn.Linear(256, 256),
+            nn.Tanh(),
+            nn.Linear(256, 128),
+            nn.Tanh(),
+            nn.Linear(128, output_dim)
+        )
+        
+    def forward(self, x):
+        return self.network(x)
+
+
+class MultiScalePredictor(nn.Module):
+    """Multi-scale architecture processing inputs at different scales."""
+    def __init__(self, input_dim, output_dim):
+        super(MultiScalePredictor, self).__init__()
+        # Fine-scale features
+        self.fine_net = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64),
+            nn.Tanh()
+        )
+        
+        # Coarse-scale features  
+        self.coarse_net = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.Tanh(),
+            nn.Linear(64, 64), 
+            nn.Tanh()
+        )
+        
+        # Combine features
+        self.combiner = nn.Sequential(
+            nn.Linear(128, 128),
+            nn.Tanh(),
+            nn.Linear(128, output_dim)
+        )
+        
+    def forward(self, x):
+        fine_features = self.fine_net(x)
+        coarse_features = self.coarse_net(x)
+        combined = torch.cat([fine_features, coarse_features], dim=-1)
+        return self.combiner(combined)
+
+
+class SiLUStatePredictor(nn.Module):
+    """State predictor using SiLU activation for potentially better performance."""
+    def __init__(self, input_dim, output_dim):
+        super(SiLUStatePredictor, self).__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.SiLU(),
+            nn.Linear(128, 128),
+            nn.SiLU(),
+            nn.Linear(128, 128),
+            nn.SiLU(),
+            nn.Linear(128, output_dim)
+        )
+    
+    def forward(self, x):
+        return self.network(x)  
+
+# class StatePredictor(nn.Module):
+#     """
+#     A right-sized neural network for state prediction.
+#     Notes: the model needs to be at least C1 continuous because:
+#         - uniform continuity assumption 4 (Seel et al., "Neural Network-Based...")
+#         - differentiability requirement for jacobian computation ("Salzmann et al., "Real-time Neural MPC")
+#         - eventually C2 for hessian computation (if using second-order approximation)
+    
+#     Derivatives:
+#         - ReLU: ReLU(x) -> Heaviside(x) (not differentiable at 0)
+#         - Tanh: tanh(x) -> sech^2(x) -> -2sech^2(x) * tanh(x)
+#         - SiLU: x * sigmoid(x) -> sigmoid(x) + x * sigmoid'(x) -> sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+#     """
+#     def __init__(self, input_dim, output_dim):
+#         super(StatePredictor, self).__init__()
+#         self.network = nn.Sequential(
+#             nn.Linear(input_dim, 128),
+#             nn.Tanh(),
+#             nn.Linear(128, 128),
+#             nn.Tanh(),
+#             nn.Linear(128, 128),
+#             nn.Tanh(),
+#             nn.Linear(128, output_dim)
+#         )
+    
+#     def forward(self, x):
+#         return self.network(x)
     
 # This bigger model is more precise but the mpc has slower convergence
 """A bigger, more precise neural network can paradoxically lead to slower MPC convergence because its complexity creates a "jagged" and non-smooth function landscape. The MPC relies on linear approximations (the tangent slope) at each step to find the next best move. On a smooth landscape, these approximations are accurate over a large area, allowing the optimizer to take confident, large steps and converge quickly. On the jagged landscape of the bigger model, the linear approximation is only valid for a tiny, immediate area. This forces the optimizer to take very small, cautious steps and run many more iterations, dramatically slowing down the process. Essentially, for this type of optimization, the smoothness of the model is more important than its absolute precision, and the simpler model provides a much smoother, more navigable landscape for the controller to work with.
@@ -587,6 +754,148 @@ def evaluate_multi_horizon_rollouts(model, X_test_orig, y_test_orig, input_scale
 
     return results
 
+
+def train_and_evaluate_architecture(architecture_name, model_class, input_dim, output_dim, 
+                                  train_loader, val_loader, X_test, y_test, 
+                                  input_scaler, output_scaler, device, args):
+    """Train and evaluate a single architecture."""
+    print(f"\n{'='*80}")
+    print(f"Training {architecture_name}")
+    print(f"{'='*80}")
+    
+    # Initialize model
+    model = model_class(input_dim, output_dim)
+    print(f"Model initialized: {architecture_name}")
+    
+    # Train model
+    history = train_model(model, train_loader, val_loader, 
+                         TrainingConfig.NUM_EPOCHS, TrainingConfig.LEARNING_RATE, device)
+    
+    # Save model with architecture-specific name
+    model_path = TrainingConfig.MODEL_PATH.replace('.pth', f'_{architecture_name.lower().replace(" ", "_")}.pth')
+    torch.save(model.state_dict(), model_path)
+    print(f"Model saved to {model_path}")
+    
+    # --- Single-step evaluation ---
+    print(f"\n--- Evaluating {architecture_name} (Single Step Predictions) ---")
+    model.eval()
+    X_test_scaled = input_scaler.transform(X_test)
+    X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
+
+    with torch.no_grad():
+        predictions_scaled = model(X_test_tensor).cpu().numpy()
+
+    predictions = output_scaler.inverse_transform(predictions_scaled)
+
+    mse = mean_squared_error(y_test, predictions)
+    mae = mean_absolute_error(y_test, predictions)
+    r2 = r2_score(y_test, predictions)
+
+    print(f"Mean Squared Error (MSE): {mse:.6f}")
+    print(f"Mean Absolute Error (MAE): {mae:.6f}")
+    print(f"R-squared (R²):           {r2:.4f}")
+
+    # Generate predictions plot
+    plot_path = TrainingConfig.PLOT_OUTPUT_PATH.replace('.png', f'_{architecture_name.lower().replace(" ", "_")}.png')
+    plot_predictions(y_test, predictions, plot_path)
+    
+    results = {
+        'architecture': architecture_name,
+        'mse': mse,
+        'mae': mae,
+        'r2': r2,
+        'model_path': model_path,
+        'plot_path': plot_path
+    }
+    
+    # --- Multi-horizon rollout evaluation ---
+    if args.rollouts_eval:
+        print(f"\n--- Evaluating {architecture_name} (Multi-Horizon Rollouts) ---")
+        rollout_results = evaluate_multi_horizon_rollouts(
+            model, X_test, y_test, input_scaler, output_scaler, device
+        )
+        results['rollout_results'] = rollout_results
+        
+        # Generate rollout plot
+        rollout_plot_path = plot_path.replace('.png', '_rollout.png')
+        plot_rollout_performance(rollout_results, rollout_plot_path)
+        results['rollout_plot_path'] = rollout_plot_path
+    
+    return results
+
+
+def compare_architectures_performance(all_results, save_path):
+    """Generate a comparison plot of all architectures."""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+    
+    architectures = [r['architecture'] for r in all_results]
+    mse_values = [r['mse'] for r in all_results]
+    mae_values = [r['mae'] for r in all_results]
+    r2_values = [r['r2'] for r in all_results]
+    
+    # MSE comparison
+    bars1 = ax1.bar(architectures, mse_values, color='skyblue', alpha=0.7)
+    ax1.set_ylabel('Mean Squared Error (MSE)')
+    ax1.set_title('MSE Comparison Across Architectures')
+    ax1.tick_params(axis='x', rotation=45)
+    for bar, val in zip(bars1, mse_values):
+        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(mse_values)*0.01, 
+                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
+    
+    # MAE comparison
+    bars2 = ax2.bar(architectures, mae_values, color='lightcoral', alpha=0.7)
+    ax2.set_ylabel('Mean Absolute Error (MAE)')
+    ax2.set_title('MAE Comparison Across Architectures')
+    ax2.tick_params(axis='x', rotation=45)
+    for bar, val in zip(bars2, mae_values):
+        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(mae_values)*0.01, 
+                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
+    
+    # R² comparison
+    bars3 = ax3.bar(architectures, r2_values, color='lightgreen', alpha=0.7)
+    ax3.set_ylabel('R-squared (R²)')
+    ax3.set_title('R² Comparison Across Architectures')
+    ax3.tick_params(axis='x', rotation=45)
+    for bar, val in zip(bars3, r2_values):
+        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(r2_values)*0.01, 
+                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
+    
+    # Rollout performance at horizon 10 (if available)
+    rollout_mse_10 = []
+    for r in all_results:
+        if 'rollout_results' in r and r['rollout_results']:
+            rollout_res = r['rollout_results']
+            if 10 in rollout_res['horizons']:
+                idx = rollout_res['horizons'].index(10)
+                rollout_mse_10.append(rollout_res['avg_mse'][idx])
+            else:
+                rollout_mse_10.append(None)
+        else:
+            rollout_mse_10.append(None)
+    
+    # Only plot rollout comparison if we have data
+    if any(x is not None for x in rollout_mse_10):
+        valid_archs = [arch for arch, val in zip(architectures, rollout_mse_10) if val is not None]
+        valid_values = [val for val in rollout_mse_10 if val is not None]
+        
+        bars4 = ax4.bar(valid_archs, valid_values, color='orange', alpha=0.7)
+        ax4.set_ylabel('Rollout MSE (10 steps)')
+        ax4.set_title('10-Step Rollout MSE Comparison')
+        ax4.tick_params(axis='x', rotation=45)
+        for bar, val in zip(bars4, valid_values):
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(valid_values)*0.01, 
+                    f'{val:.4f}', ha='center', va='bottom', fontsize=8)
+    else:
+        ax4.text(0.5, 0.5, 'No rollout data available', ha='center', va='center', 
+                transform=ax4.transAxes, fontsize=12)
+        ax4.set_title('10-Step Rollout MSE Comparison')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"\nArchitecture comparison plot saved to: {save_path}")
+    plt.close(fig)
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     
@@ -647,110 +956,93 @@ if __name__ == "__main__":
     train_loader = DataLoader(train_dataset, batch_size=TrainingConfig.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=TrainingConfig.BATCH_SIZE, shuffle=False)
 
-    # --- Initialize and Train Model ---
+    # --- Initialize device and dimensions ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"\nUsing device: {device}")
     
-    # The input dimension is now automatically inferred from the data, including dt
     input_dim = X_train.shape[1]
     output_dim = y_train.shape[1]
-    model = StatePredictor(input_dim, output_dim)
-    print(f"Model initialized with input_dim={input_dim} and output_dim={output_dim}")
+    print(f"Input dimension: {input_dim}, Output dimension: {output_dim}")
 
-    history = train_model(model, train_loader, val_loader, TrainingConfig.NUM_EPOCHS, TrainingConfig.LEARNING_RATE, device)
-
-    # --- Save the trained model and the scalers ---
-    print("\n--- Saving model and scalers ---")
-    torch.save(model.state_dict(), TrainingConfig.MODEL_PATH)
+    # --- Save scalers (shared across all models) ---
     joblib.dump(input_scaler, TrainingConfig.INPUT_SCALER_PATH)
     joblib.dump(output_scaler, TrainingConfig.OUTPUT_SCALER_PATH)
-    print(f"Model saved to {TrainingConfig.MODEL_PATH}")
     print(f"Input scaler saved to {TrainingConfig.INPUT_SCALER_PATH}")
     print(f"Output scaler saved to {TrainingConfig.OUTPUT_SCALER_PATH}")
+
+    # --- Define all architectures to train ---
+    architectures = [
+        ("Baseline", BaselineStatePredictor),
+        ("Residual", ResidualStatePredictor),
+        ("Physics Informed", PhysicsInformedPredictor),
+        ("Wide Network", WideStatePredictor),
+        ("Multi Scale", MultiScalePredictor),
+        ("SiLU Activation", SiLUStatePredictor)
+    ]
     
-    # --- Evaluation on Test Set (Single Step Predictions) ---
-    print("\n--- Evaluating on Test Set (Single Step Predictions) ---")
-    model.eval()
-    X_test_scaled = input_scaler.transform(X_test)
-    X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32).to(device)
-
-    with torch.no_grad():
-        predictions_scaled = model(X_test_tensor).cpu().numpy()
-
-    predictions = output_scaler.inverse_transform(predictions_scaled)
-
-    mse = mean_squared_error(y_test, predictions)
-    mae = mean_absolute_error(y_test, predictions)
-    r2 = r2_score(y_test, predictions)
-
-    print("\n--- Performance Metrics (Single Step Predictions) ---")
-    print(f"Mean Squared Error (MSE): {mse:.6f}")
-    print(f"Mean Absolute Error (MAE): {mae:.6f}")
-    print(f"R-squared (R²):           {r2:.4f}")
-
-    plot_predictions(y_test, predictions, TrainingConfig.PLOT_OUTPUT_PATH)
+    # --- Train and evaluate all architectures ---
+    all_results = []
     
-    if args.rollouts_eval:
-        print("\n--- Evaluating Multi-Horizon Rollouts ---")
+    for arch_name, arch_class in architectures:
+        try:
+            result = train_and_evaluate_architecture(
+                arch_name, arch_class, input_dim, output_dim,
+                train_loader, val_loader, X_test, y_test,
+                input_scaler, output_scaler, device, args
+            )
+            all_results.append(result)
+        except Exception as e:
+            print(f"Error training {arch_name}: {e}")
+            print("Continuing with next architecture...")
+            continue
     
-        # --- Full NN Multi-Horizon Rollout Evaluation ---
-        results_full = evaluate_multi_horizon_rollouts(
-            model, 
-            X_test, 
-            y_test, 
-            input_scaler, 
-            output_scaler, 
-            device
-        )
+    # --- Generate comparison plots and summary ---
+    if len(all_results) > 0:
+        print(f"\n{'='*80}")
+        print("SUMMARY OF ALL ARCHITECTURES")
+        print(f"{'='*80}")
         
-        # --- First-Order Approximation Rollout Evaluation ---
-        results_first_order = evaluate_approximation_rollouts(
-            model,
-            X_test,
-            y_test,
-            input_scaler,
-            output_scaler,
-            device,
-            approximation_order=1,
-            horizons=[1, 5, 10, 20, 40],
-            num_rollouts=1000
-        )
+        # Print summary table
+        print(f"{'Architecture':<20} {'MSE':<12} {'MAE':<12} {'R²':<10} {'10-step Rollout MSE':<20}")
+        print("-" * 80)
         
-        # --- Second-Order Approximation Rollout Evaluation ---
-        results_second_order = evaluate_approximation_rollouts(
-            model,
-            X_test,
-            y_test,
-            input_scaler,
-            output_scaler,
-            device,
-            approximation_order=2,
-            horizons=[1, 5, 10, 20, 40],
-            num_rollouts=1000
-        )
+        for result in all_results:
+            rollout_mse_10 = "N/A"
+            if 'rollout_results' in result and result['rollout_results']:
+                rollout_res = result['rollout_results']
+                if 10 in rollout_res['horizons']:
+                    idx = rollout_res['horizons'].index(10)
+                    rollout_mse_10 = f"{rollout_res['avg_mse'][idx]:.6f}"
+            
+            print(f"{result['architecture']:<20} {result['mse']:<12.6f} {result['mae']:<12.6f} "
+                  f"{result['r2']:<10.4f} {rollout_mse_10:<20}")
         
-        # --- Generate Combined Rollout Performance Plot ---
-        results_comparison = {
-            'Full Neural Network': results_full,
-            'First-Order Approximation': results_first_order,
-            'Second-Order Approximation': results_second_order
-        }
+        # Generate architecture comparison plot
+        comparison_plot_path = TrainingConfig.PLOT_OUTPUT_PATH.replace('.png', '_architecture_comparison.png')
+        compare_architectures_performance(all_results, comparison_plot_path)
         
-        # Replace the individual rollout plot with the comparison plot
-        rollout_plot_path = TrainingConfig.PLOT_OUTPUT_PATH.replace('.png', '_rollout.png')
-        plot_approximation_comparison(results_comparison, rollout_plot_path)
+        # Find best performing architectures
+        best_mse = min(all_results, key=lambda x: x['mse'])
+        best_r2 = max(all_results, key=lambda x: x['r2'])
         
-        # Compare approximations at different horizons
-        for i, horizon in enumerate(results_full['horizons']):
-            if horizon in results_first_order['horizons'] and horizon in results_second_order['horizons']:
-                full_mse = results_full['avg_mse'][i]
-                first_mse = results_first_order['avg_mse'][results_first_order['horizons'].index(horizon)]
-                second_mse = results_second_order['avg_mse'][results_second_order['horizons'].index(horizon)]
-                
-                first_error_ratio = first_mse / full_mse if full_mse > 0 else float('inf')
-                second_error_ratio = second_mse / full_mse if full_mse > 0 else float('inf')
-                
-                print(f"Horizon {horizon:3d}: Full NN MSE: {full_mse:.6f}, 1st-order: {first_error_ratio:.2f}x, 2nd-order: {second_error_ratio:.2f}x")
-    
-    print(f"\nAll evaluation plots saved to: {os.path.dirname(TrainingConfig.PLOT_OUTPUT_PATH)}")
-    print("Training and evaluation completed successfully!")
+        print(f"\nBest MSE: {best_mse['architecture']} (MSE: {best_mse['mse']:.6f})")
+        print(f"Best R²:  {best_r2['architecture']} (R²: {best_r2['r2']:.4f})")
+        
+        if args.rollouts_eval:
+            # Find best rollout performance
+            rollout_results_valid = [r for r in all_results if 'rollout_results' in r and r['rollout_results']]
+            if rollout_results_valid:
+                best_rollout = min(rollout_results_valid, 
+                                 key=lambda x: x['rollout_results']['avg_mse'][x['rollout_results']['horizons'].index(10)] 
+                                 if 10 in x['rollout_results']['horizons'] else float('inf'))
+                if 10 in best_rollout['rollout_results']['horizons']:
+                    idx = best_rollout['rollout_results']['horizons'].index(10)
+                    best_rollout_mse = best_rollout['rollout_results']['avg_mse'][idx]
+                    print(f"Best 10-step Rollout: {best_rollout['architecture']} (MSE: {best_rollout_mse:.6f})")
+        
+        print(f"\nAll models and plots saved to: {os.path.dirname(TrainingConfig.MODEL_PATH)}")
+        print("Training and evaluation completed successfully!")
+        
+    else:
+        print("No architectures were successfully trained!")
+        sys.exit(1)
