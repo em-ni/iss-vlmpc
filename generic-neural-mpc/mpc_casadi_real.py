@@ -1,4 +1,5 @@
 # mpc_casadi_real.py
+import os
 import sys
 import time
 import pandas as pd
@@ -14,7 +15,9 @@ from model.train_robot import StatePredictor, TrainingConfig as TrainConfig
 
 # --- Configuration ---
 class MPCConfig:
-    MODEL_PATH = TrainConfig.MODEL_PATH
+    # MODEL_PATH = TrainConfig.MODEL_PATH
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    MODEL_PATH = os.path.join(BASE_DIR, "model", "data", "real_rob_f_enhanced_temporal_multi-scale.pth")
     INPUT_SCALER_PATH = TrainConfig.INPUT_SCALER_PATH
     OUTPUT_SCALER_PATH = TrainConfig.OUTPUT_SCALER_PATH
     REAL_DATASET_PATH = TrainConfig.REAL_DATASET_PATH
@@ -35,8 +38,8 @@ class MPCConfig:
     U_MIN = [min_volume, min_volume, min_volume]
     U_MAX = [max_volume, max_volume, max_volume]
     # Workspace box constraints: x, y, z, x_dot, y_dot, z_dot
-    X_MAX = [2.4, 0.7, 0.8, 20.0, 20.0, 20.0]
     X_MIN = [0.36, -1.8, -1.6, -20.0, -20.0, -20.0]
+    X_MAX = [2.4, 0.7, 0.8, 20.0, 20.0, 20.0]
 
     def stability_check(self):
         """
@@ -621,7 +624,7 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
     sample = mpc.df[mpc.state_cols].dropna().sample(2, random_state=42)
     x_current = sample.iloc[0].values
     # x_target = sample.iloc[1].values
-    x_target = np.array([0.01, -0.42, -0.62, 0.0, 0.0, 0.0])
+    x_target = np.array([2.0, 0.5, -1.0, 0.0, 0.0, 0.0])
     
     history_x, history_u = [x_current], []
     history_x_target = [x_target]

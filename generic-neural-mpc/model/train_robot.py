@@ -19,7 +19,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # --- Training Configuration ---
 class TrainingConfig:
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 
     REAL_DATASET_PATH = os.path.join(BASE_DIR, "data", "output_exp_2025-07-22_12-23-07.csv")
     MODEL_PATH = os.path.join(BASE_DIR, "data", "real_rob_f.pth")
@@ -35,222 +34,138 @@ class TrainingConfig:
     WEIGHT_DECAY = 1e-5
 
 
-class BaselineStatePredictor(nn.Module):
-    """
-    A right-sized neural network for state prediction (Baseline).
-    Notes: the model needs to be at least C1 continuous because:
-        - uniform continuity assumption 4 (Seel et al., "Neural Network-Based...")
-        - differentiability requirement for jacobian computation ("Salzmann et al., "Real-time Neural MPC")
-        - eventually C2 for hessian computation (if using second-order approximation)
+import torch.nn.functional as F
+
+def filter_training_data(df, velocity_threshold=10.0, acceleration_threshold=50.0):
+    """Filter out unrealistic or noisy data points"""
+    vel_cols = ['tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
+    vel_mask = (df[vel_cols].abs() < velocity_threshold).all(axis=1)
+    df_clean = df[vel_mask].copy()
     
-    Derivatives:
-        - ReLU: ReLU(x) -> Heaviside(x) (not differentiable at 0)
-        - Tanh: tanh(x) -> sech^2(x) -> -2sech^2(x) * tanh(x)
-        - SiLU: x * sigmoid(x) -> sigmoid(x) + x * sigmoid'(x) -> sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+    for traj_id, group in df_clean.groupby('trajectory'):
+        if len(group) < 2:
+            continue
+        dt = 0.02
+        for vel_col in vel_cols:
+            acc_col = vel_col.replace('velocity', 'acceleration')
+            df_clean.loc[group.index[1:], acc_col] = np.diff(group[vel_col].values) / dt
+    
+    acc_cols = [col for col in df_clean.columns if 'acceleration' in col]
+    if acc_cols:
+        acc_mask = (df_clean[acc_cols].abs() < acceleration_threshold).all(axis=1)
+        df_clean = df_clean[acc_mask]
+    
+    return df_clean
+
+def physics_informed_loss(model, inputs, targets, dt=0.02):
+    """Add physics constraints to improve dynamics modeling"""
+    current_pos = inputs[:, 3:6]
+    current_vel = inputs[:, 6:9]
+    
+    predictions = model(inputs)
+    pred_pos = predictions[:, :3]
+    pred_vel = predictions[:, 3:6]
+    
+    # Position integration consistency
+    expected_pos = current_pos + current_vel * dt
+    position_consistency = F.mse_loss(pred_pos, expected_pos)
+    
+    # Velocity smoothness
+    vel_change = pred_vel - current_vel
+    smoothness_penalty = torch.mean(torch.norm(vel_change, dim=1))
+    
+    # Energy conservation
+    current_energy = 0.5 * torch.sum(current_vel**2, dim=1)
+    pred_energy = 0.5 * torch.sum(pred_vel**2, dim=1)
+    energy_penalty = torch.mean(torch.abs(pred_energy - current_energy))
+    
+    return {
+        'position_consistency': position_consistency,
+        'smoothness': smoothness_penalty,
+        'energy': energy_penalty
+    }
+
+"""A bigger, more precise neural network can lead to slower MPC convergence because its complexity creates a "jagged" and non-smooth function landscape. The MPC relies on linear approximations (the tangent slope) at each step to find the next best move. On a smooth landscape, these approximations are accurate over a large area, allowing the optimizer to take confident, large steps and converge quickly. On the jagged landscape of the bigger model, the linear approximation is only valid for a tiny, immediate area. This forces the optimizer to take very small, cautious steps and run many more iterations, dramatically slowing down the process. Essentially, for this type of optimization, the smoothness of the model is more important than its absolute precision, and the simpler model provides a much smoother, more navigable landscape for the controller to work with.
+"""
+class StatePredictor(nn.Module):
+    """
+    Enhanced Multi-Scale architecture with temporal dynamics for better rollout stability.
+    Captures different time scales: short-term (high frequency), medium-term, and long-term (low frequency).
     """
     def __init__(self, input_dim, output_dim):
-        super(BaselineStatePredictor, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh(),
-            nn.Linear(128, output_dim)
-        )
-    
-    def forward(self, x):
-        return self.network(x)
-
-
-class ResidualBlock(nn.Module):
-    """Residual block with skip connections for better gradient flow."""
-    def __init__(self, dim):
-        super(ResidualBlock, self).__init__()
-        self.linear1 = nn.Linear(dim, dim)
-        self.linear2 = nn.Linear(dim, dim)
+        super(StatePredictor, self).__init__()
         
-    def forward(self, x):
-        residual = x
-        x = torch.tanh(self.linear1(x))
-        x = torch.tanh(self.linear2(x))
-        return x + residual  # Skip connection
-
-
-class ResidualStatePredictor(nn.Module):
-    """State predictor with residual connections for better training stability."""
-    def __init__(self, input_dim, output_dim):
-        super(ResidualStatePredictor, self).__init__()
-        self.input_proj = nn.Linear(input_dim, 128)
-        
-        # Residual blocks
-        self.block1 = ResidualBlock(128)
-        self.block2 = ResidualBlock(128)
-        self.block3 = ResidualBlock(128)
-        
-        self.output_proj = nn.Linear(128, output_dim)
-        
-    def forward(self, x):
-        x = torch.tanh(self.input_proj(x))
-        x = self.block1(x)
-        x = self.block2(x) 
-        x = self.block3(x)
-        return self.output_proj(x)
-
-
-class PhysicsInformedPredictor(nn.Module):
-    """Physics-informed architecture separating position and velocity dynamics."""
-    def __init__(self, input_dim, output_dim):
-        super(PhysicsInformedPredictor, self).__init__()
-        # Shared feature extraction
-        self.shared = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.Tanh(),
-            nn.Linear(128, 128),
-            nn.Tanh()
-        )
-        
-        # Position dynamics (3 outputs: tip_x, tip_y, tip_z)
-        self.position_net = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.Tanh(),
-            nn.Linear(64, 3)
-        )
-        
-        # Velocity dynamics (3 outputs: tip_velocity_x, tip_velocity_y, tip_velocity_z)  
-        self.velocity_net = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.Tanh(),
-            nn.Linear(64, 3)
-        )
-        
-    def forward(self, x):
-        features = self.shared(x)
-        pos_pred = self.position_net(features)
-        vel_pred = self.velocity_net(features)
-        return torch.cat([pos_pred, vel_pred], dim=-1)
-
-
-class WideStatePredictor(nn.Module):
-    """Wider network for better expressiveness."""
-    def __init__(self, input_dim, output_dim):
-        super(WideStatePredictor, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.Tanh(),
-            nn.Linear(256, 256),
-            nn.Tanh(),
-            nn.Linear(256, 128),
-            nn.Tanh(),
-            nn.Linear(128, output_dim)
-        )
-        
-    def forward(self, x):
-        return self.network(x)
-
-
-class MultiScalePredictor(nn.Module):
-    """Multi-scale architecture processing inputs at different scales."""
-    def __init__(self, input_dim, output_dim):
-        super(MultiScalePredictor, self).__init__()
-        # Fine-scale features
-        self.fine_net = nn.Sequential(
+        # Short-term dynamics (high frequency, quick responses)
+        self.short_term = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.Tanh(),
             nn.Linear(64, 64),
             nn.Tanh()
         )
         
-        # Coarse-scale features  
-        self.coarse_net = nn.Sequential(
+        # Medium-term dynamics (intermediate frequency)
+        self.medium_term = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.Tanh(),
-            nn.Linear(64, 64), 
+            nn.Linear(64, 64),
             nn.Tanh()
         )
         
-        # Combine features
-        self.combiner = nn.Sequential(
-            nn.Linear(128, 128),
+        # Long-term dynamics (low frequency, more stable trends)
+        self.long_term = nn.Sequential(
+            nn.Linear(input_dim, 32),
             nn.Tanh(),
-            nn.Linear(128, output_dim)
+            nn.Linear(32, 32),
+            nn.Tanh()
         )
         
-    def forward(self, x):
-        fine_features = self.fine_net(x)
-        coarse_features = self.coarse_net(x)
-        combined = torch.cat([fine_features, coarse_features], dim=-1)
-        return self.combiner(combined)
-
-
-class SiLUStatePredictor(nn.Module):
-    """State predictor using SiLU activation for potentially better performance."""
-    def __init__(self, input_dim, output_dim):
-        super(SiLUStatePredictor, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, 128),
-            nn.SiLU(),
-            nn.Linear(128, 128),
-            nn.SiLU(),
-            nn.Linear(128, 128),
-            nn.SiLU(),
-            nn.Linear(128, output_dim)
+        # Add skip connection for better gradient flow
+        self.skip_connection = nn.Linear(input_dim, 64)
+        
+        # Combine with learned weights for better stability
+        self.combiner = nn.Sequential(
+            nn.Linear(64 + 64 + 32 + 64, 128),  # +64 for skip connection
+            nn.Tanh(),
+            nn.Linear(128, 64),
+            nn.Tanh(),
+            nn.Linear(64, output_dim)
         )
-    
+        
+        # Learnable time-scale weights (initialized to emphasize stability)
+        self.time_weights = nn.Parameter(torch.tensor([1.0, 0.5, 0.2]))
+        
+        # Initialize weights for stability
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        """Initialize weights for better stability"""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.constant_(m.bias, 0.0)
+        
     def forward(self, x):
-        return self.network(x)  
-
-# class StatePredictor(nn.Module):
-#     """
-#     A right-sized neural network for state prediction.
-#     Notes: the model needs to be at least C1 continuous because:
-#         - uniform continuity assumption 4 (Seel et al., "Neural Network-Based...")
-#         - differentiability requirement for jacobian computation ("Salzmann et al., "Real-time Neural MPC")
-#         - eventually C2 for hessian computation (if using second-order approximation)
+        # Normalize time weights
+        weights = torch.softmax(self.time_weights, dim=0)
+        
+        # Apply time-scale weighting to emphasize different dynamics
+        short_features = self.short_term(x) * weights[0]
+        medium_features = self.medium_term(x) * weights[1]
+        long_features = self.long_term(x) * weights[2]
+        skip_features = torch.tanh(self.skip_connection(x))
+        
+        # Combine all temporal features
+        combined = torch.cat([short_features, medium_features, long_features, skip_features], dim=-1)
+        return self.combiner(combined)
     
-#     Derivatives:
-#         - ReLU: ReLU(x) -> Heaviside(x) (not differentiable at 0)
-#         - Tanh: tanh(x) -> sech^2(x) -> -2sech^2(x) * tanh(x)
-#         - SiLU: x * sigmoid(x) -> sigmoid(x) + x * sigmoid'(x) -> sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
-#     """
-#     def __init__(self, input_dim, output_dim):
-#         super(StatePredictor, self).__init__()
-#         self.network = nn.Sequential(
-#             nn.Linear(input_dim, 128),
-#             nn.Tanh(),
-#             nn.Linear(128, 128),
-#             nn.Tanh(),
-#             nn.Linear(128, 128),
-#             nn.Tanh(),
-#             nn.Linear(128, output_dim)
-#         )
-    
-#     def forward(self, x):
-#         return self.network(x)
-    
-# This bigger model is more precise but the mpc has slower convergence
-"""A bigger, more precise neural network can paradoxically lead to slower MPC convergence because its complexity creates a "jagged" and non-smooth function landscape. The MPC relies on linear approximations (the tangent slope) at each step to find the next best move. On a smooth landscape, these approximations are accurate over a large area, allowing the optimizer to take confident, large steps and converge quickly. On the jagged landscape of the bigger model, the linear approximation is only valid for a tiny, immediate area. This forces the optimizer to take very small, cautious steps and run many more iterations, dramatically slowing down the process. Essentially, for this type of optimization, the smoothness of the model is more important than its absolute precision, and the simpler model provides a much smoother, more navigable landscape for the controller to work with.
-"""
-# class StatePredictor(nn.Module):
-#     """A simple feed-forward neural network for state prediction."""
-#     def __init__(self, input_dim, output_dim):
-#         super(StatePredictor, self).__init__()
-#         self.network = nn.Sequential(
-#             nn.Linear(input_dim, 128),
-#             nn.ReLU(),
-#             nn.Linear(128, 256),
-#             nn.ReLU(),
-#             nn.Linear(256, 128),
-#             nn.ReLU(),
-#             nn.Linear(128, output_dim)
-#         )
-    
-#     def forward(self, x):
-#         return self.network(x)
+    def stability_penalty(self):
+        """Compute stability penalty for the time weights"""
+        target_weights = torch.tensor([1.0, 0.5, 0.2], device=self.time_weights.device)
+        weight_penalty = torch.sum(torch.abs(self.time_weights - target_weights))
+        return 0.01 * weight_penalty
 
 class RobotStateDataset(Dataset):
-    """Custom PyTorch Dataset."""
+    """Custom PyTorch Dataset for single-step predictions."""
     def __init__(self, X, y):
         # Convert numpy arrays to PyTorch tensors
         self.X = torch.tensor(X, dtype=torch.float32)
@@ -263,6 +178,20 @@ class RobotStateDataset(Dataset):
         return self.X[idx], self.y[idx]
 
 
+class RobotSequenceDataset(Dataset):
+    """Custom PyTorch Dataset for sequence-based training."""
+    def __init__(self, sequences_X, sequences_y):
+        # sequences_X: (N, seq_len, 9), sequences_y: (N, seq_len, 6)
+        self.sequences_X = torch.tensor(sequences_X, dtype=torch.float32)
+        self.sequences_y = torch.tensor(sequences_y, dtype=torch.float32)
+        
+    def __len__(self):
+        return len(self.sequences_X)
+    
+    def __getitem__(self, idx):
+        return self.sequences_X[idx], self.sequences_y[idx]
+
+
 def load_and_prepare_data(filepath):
     """
     Loads data from trajectories and creates pairs where X = [u_k, x_k]
@@ -272,6 +201,9 @@ def load_and_prepare_data(filepath):
     print(f"Loading data from {filepath}...")
     df = pd.read_csv(filepath)
     df.columns = df.columns.str.strip().str.replace(' \(.*\)', '', regex=True)
+
+    # Filter noisy data
+    df = filter_training_data(df)
 
     STATE_COLS = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
     INPUT_COLS = ['volume_1', 'volume_2', 'volume_3']
@@ -304,8 +236,213 @@ def load_and_prepare_data(filepath):
     return X, y
 
 
+def create_sequence_dataset(filepath, sequence_length=8):
+    """
+    Create training sequences from actual trajectories for multi-step training.
+    Returns sequences of (input, output) pairs for training on rollouts.
+    """
+    print(f"Loading sequence data from {filepath}...")
+    df = pd.read_csv(filepath)
+    df.columns = df.columns.str.strip().str.replace(' \(.*\)', '', regex=True)
+
+    STATE_COLS = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
+    INPUT_COLS = ['volume_1', 'volume_2', 'volume_3']
+    CURRENT_FEATURES = INPUT_COLS + STATE_COLS
+    
+    df.dropna(subset=CURRENT_FEATURES + ['T'], inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
+    sequences_X = []
+    sequences_y = []
+    
+    print("Processing trajectory sequences...")
+    for traj_id, group in df.groupby('trajectory'):
+        if len(group) < sequence_length + 1:
+            continue
+            
+        traj_data = group[CURRENT_FEATURES + STATE_COLS].values
+        
+        # Create overlapping sequences from this trajectory
+        for i in range(len(traj_data) - sequence_length):
+            # Input sequence: [u_k, x_k] for each step in sequence
+            seq_x = traj_data[i:i+sequence_length, :9]  # First 9 columns: [u, x]
+            # Output sequence: x_{k+1} for each step
+            seq_y = traj_data[i+1:i+sequence_length+1, 3:9]  # State columns only
+            
+            sequences_X.append(seq_x)
+            sequences_y.append(seq_y)
+    
+    if not sequences_X:
+        raise ValueError("Not enough data to create sequence training pairs.")
+    
+    sequences_X = np.array(sequences_X)
+    sequences_y = np.array(sequences_y)
+    
+    print(f"Created {len(sequences_X)} sequences of length {sequence_length}")
+    print(f"Sequence input shape: {sequences_X.shape}")
+    print(f"Sequence output shape: {sequences_y.shape}")
+    
+    return sequences_X, sequences_y
+
+
+def multi_step_training_loss(model, input_scaler, output_scaler, seq_x, seq_y, device, epoch, max_epochs):
+    """Enhanced multi-step training loss with adaptive horizon"""
+    batch_size, seq_len, _ = seq_x.shape
+    
+    # Progressive horizon: start with 2, reach 15 by end of training
+    current_horizon = min(2 + int(13 * epoch / max_epochs), 15)
+    actual_horizon = min(current_horizon, seq_len)
+    
+    total_loss = 0.0
+    
+    for start_step in range(seq_len - actual_horizon + 1):
+        current_x_and_u = seq_x[:, start_step, :].clone()
+        step_losses = []
+        
+        for pred_step in range(actual_horizon):
+            pred_next_state_scaled = model(current_x_and_u)
+            
+            target_step = start_step + pred_step
+            if target_step < seq_len:
+                target = seq_y[:, target_step, :]
+                
+                pred_next_state_np = pred_next_state_scaled.cpu().detach().numpy()
+                pred_next_state = output_scaler.inverse_transform(pred_next_state_np)
+                pred_next_state_tensor = torch.tensor(pred_next_state, dtype=torch.float32, device=device)
+                
+                # Exponentially weighted loss (later steps more important)
+                weight = 1.5 ** pred_step
+                step_loss = weight * F.mse_loss(pred_next_state_tensor, target)
+                step_losses.append(step_loss)
+                
+                # Teacher forcing with decay probability
+                teacher_forcing_prob = max(0.1, 1.0 - (pred_step * 0.15) - (epoch / max_epochs * 0.5))
+                
+                if pred_step < actual_horizon - 1 and target_step + 1 < seq_len:
+                    if torch.rand(1).item() < teacher_forcing_prob:
+                        next_state_portion = seq_y[:, target_step, :]
+                    else:
+                        next_state_portion = pred_next_state_tensor.detach()
+                    
+                    next_control = seq_x[:, target_step + 1, :3]
+                    next_x_and_u = torch.cat([next_control, next_state_portion], dim=1)
+                    
+                    next_x_and_u_np = next_x_and_u.cpu().detach().numpy()
+                    next_x_and_u_scaled = input_scaler.transform(next_x_and_u_np)
+                    current_x_and_u = torch.tensor(next_x_and_u_scaled, dtype=torch.float32, device=device)
+        
+        if step_losses:
+            total_loss += sum(step_losses) / len(step_losses)
+    
+    return total_loss / max(1, seq_len - actual_horizon + 1), current_horizon
+
+
+def train_model_with_sequences(model, single_step_loader, sequence_loader, val_loader, 
+                              num_epochs, learning_rate, input_scaler, output_scaler, device):
+    """
+    Enhanced training loop that combines single-step and multi-step training.
+    """
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs)
+    
+    model.to(device)
+    
+    history = {'train_loss': [], 'val_loss': []}
+    
+    print("Starting enhanced training with multi-step loss...")
+    for epoch in range(num_epochs):
+        model.train()
+        
+        # Progressive learning rate
+        if epoch < num_epochs // 3:
+            lr = 1e-3
+        elif epoch < 2 * num_epochs // 3:
+            lr = 5e-4
+        else:
+            lr = 1e-4
+        
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        # Adaptive multi-step weight: reach 80% by epoch 50
+        multi_step_weight = min(0.8, epoch / (num_epochs * 0.5))
+        single_step_weight = 1.0 - multi_step_weight
+        
+        # Train on single-step data
+        single_step_losses = []
+        for inputs, targets in single_step_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            outputs = model(inputs)
+            single_loss = criterion(outputs, targets)
+            
+            # Add physics-informed loss
+            physics_losses = physics_informed_loss(model, inputs, targets)
+            physics_loss = (0.1 * physics_losses['position_consistency'] + 
+                          0.05 * physics_losses['smoothness'] + 
+                          0.01 * physics_losses['energy'])
+            
+            single_step_losses.append(single_loss + physics_loss)
+        
+        # Train on sequence data (multi-step)
+        multi_step_losses = []
+        current_horizon = 2
+        for seq_inputs, seq_targets in sequence_loader:
+            seq_inputs = seq_inputs.to(device)
+            seq_targets = seq_targets.to(device)
+            
+            multi_loss, current_horizon = multi_step_training_loss(
+                model, input_scaler, output_scaler, 
+                seq_inputs, seq_targets, device, epoch, num_epochs
+            )
+            multi_step_losses.append(multi_loss)
+        
+        # Combine losses and do one optimization step
+        total_single_loss = sum(single_step_losses) / len(single_step_losses) if single_step_losses else 0
+        total_multi_loss = sum(multi_step_losses) / len(multi_step_losses) if multi_step_losses else 0
+        
+        combined_loss = single_step_weight * total_single_loss + multi_step_weight * total_multi_loss
+        
+        # Add stability penalty
+        stability_loss = model.stability_penalty() if hasattr(model, 'stability_penalty') else 0
+        total_loss = combined_loss + stability_loss
+        
+        optimizer.zero_grad()
+        total_loss.backward()
+        
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
+        scheduler.step()
+        
+        history['train_loss'].append(total_loss.item())
+        
+        # Validation (single-step for simplicity)
+        model.eval()
+        running_val_loss = 0.0
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                running_val_loss += loss.item()
+        
+        val_loss = running_val_loss / len(val_loader)
+        history['val_loss'].append(val_loss)
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {total_loss.item():.6f}, "
+                  f"Val Loss: {val_loss:.6f}, Multi-step weight: {multi_step_weight:.3f}, "
+                  f"Horizon: {current_horizon}")
+    
+    print("Enhanced training finished.")
+    return history
+
+
 def train_model(model, train_loader, val_loader, num_epochs, learning_rate, device):
-    """The main training loop."""
+    """The original single-step training loop (kept for compatibility)."""
     criterion = nn.MSELoss()  # Mean Squared Error is good for regression
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=TrainingConfig.WEIGHT_DECAY)
     
@@ -756,22 +893,23 @@ def evaluate_multi_horizon_rollouts(model, X_test_orig, y_test_orig, input_scale
 
 
 def train_and_evaluate_architecture(architecture_name, model_class, input_dim, output_dim, 
-                                  train_loader, val_loader, X_test, y_test, 
+                                  train_loader, val_loader, sequence_loader, X_test, y_test, 
                                   input_scaler, output_scaler, device, args):
-    """Train and evaluate a single architecture."""
+    """Train and evaluate the enhanced architecture with multi-step training."""
     print(f"\n{'='*80}")
-    print(f"Training {architecture_name}")
+    print(f"Training {architecture_name} with Enhanced Multi-Step Learning")
     print(f"{'='*80}")
     
     # Initialize model
     model = model_class(input_dim, output_dim)
     print(f"Model initialized: {architecture_name}")
     
-    # Train model
-    history = train_model(model, train_loader, val_loader, 
-                         TrainingConfig.NUM_EPOCHS, TrainingConfig.LEARNING_RATE, device)
+    # Train model with enhanced training
+    history = train_model_with_sequences(model, train_loader, sequence_loader, val_loader, 
+                                       TrainingConfig.NUM_EPOCHS, TrainingConfig.LEARNING_RATE, 
+                                       input_scaler, output_scaler, device)
     
-    # Save model with architecture-specific name
+    # Save model
     model_path = TrainingConfig.MODEL_PATH.replace('.pth', f'_{architecture_name.lower().replace(" ", "_")}.pth')
     torch.save(model.state_dict(), model_path)
     print(f"Model saved to {model_path}")
@@ -820,80 +958,34 @@ def train_and_evaluate_architecture(architecture_name, model_class, input_dim, o
         rollout_plot_path = plot_path.replace('.png', '_rollout.png')
         plot_rollout_performance(rollout_results, rollout_plot_path)
         results['rollout_plot_path'] = rollout_plot_path
+        
+        # Evaluate first-order approximation
+        print(f"\n--- Evaluating {architecture_name} (First-Order Approximation Rollouts) ---")
+        first_order_results = evaluate_approximation_rollouts(
+            model, X_test, y_test, input_scaler, output_scaler, device, 
+            approximation_order=1
+        )
+        results['first_order_results'] = first_order_results
+        
+        # Evaluate second-order approximation
+        print(f"\n--- Evaluating {architecture_name} (Second-Order Approximation Rollouts) ---")
+        second_order_results = evaluate_approximation_rollouts(
+            model, X_test, y_test, input_scaler, output_scaler, device, 
+            approximation_order=2
+        )
+        results['second_order_results'] = second_order_results
+        
+        # Generate comparison plot
+        comparison_results = {
+            'Full Neural Network': rollout_results,
+            'First-Order Approximation': first_order_results,
+            'Second-Order Approximation': second_order_results
+        }
+        comparison_plot_path = plot_path.replace('.png', '_approximation_comparison.png')
+        plot_approximation_comparison(comparison_results, comparison_plot_path)
+        results['comparison_plot_path'] = comparison_plot_path
     
     return results
-
-
-def compare_architectures_performance(all_results, save_path):
-    """Generate a comparison plot of all architectures."""
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
-    
-    architectures = [r['architecture'] for r in all_results]
-    mse_values = [r['mse'] for r in all_results]
-    mae_values = [r['mae'] for r in all_results]
-    r2_values = [r['r2'] for r in all_results]
-    
-    # MSE comparison
-    bars1 = ax1.bar(architectures, mse_values, color='skyblue', alpha=0.7)
-    ax1.set_ylabel('Mean Squared Error (MSE)')
-    ax1.set_title('MSE Comparison Across Architectures')
-    ax1.tick_params(axis='x', rotation=45)
-    for bar, val in zip(bars1, mse_values):
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(mse_values)*0.01, 
-                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
-    
-    # MAE comparison
-    bars2 = ax2.bar(architectures, mae_values, color='lightcoral', alpha=0.7)
-    ax2.set_ylabel('Mean Absolute Error (MAE)')
-    ax2.set_title('MAE Comparison Across Architectures')
-    ax2.tick_params(axis='x', rotation=45)
-    for bar, val in zip(bars2, mae_values):
-        ax2.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(mae_values)*0.01, 
-                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
-    
-    # R² comparison
-    bars3 = ax3.bar(architectures, r2_values, color='lightgreen', alpha=0.7)
-    ax3.set_ylabel('R-squared (R²)')
-    ax3.set_title('R² Comparison Across Architectures')
-    ax3.tick_params(axis='x', rotation=45)
-    for bar, val in zip(bars3, r2_values):
-        ax3.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(r2_values)*0.01, 
-                f'{val:.4f}', ha='center', va='bottom', fontsize=8)
-    
-    # Rollout performance at horizon 10 (if available)
-    rollout_mse_10 = []
-    for r in all_results:
-        if 'rollout_results' in r and r['rollout_results']:
-            rollout_res = r['rollout_results']
-            if 10 in rollout_res['horizons']:
-                idx = rollout_res['horizons'].index(10)
-                rollout_mse_10.append(rollout_res['avg_mse'][idx])
-            else:
-                rollout_mse_10.append(None)
-        else:
-            rollout_mse_10.append(None)
-    
-    # Only plot rollout comparison if we have data
-    if any(x is not None for x in rollout_mse_10):
-        valid_archs = [arch for arch, val in zip(architectures, rollout_mse_10) if val is not None]
-        valid_values = [val for val in rollout_mse_10 if val is not None]
-        
-        bars4 = ax4.bar(valid_archs, valid_values, color='orange', alpha=0.7)
-        ax4.set_ylabel('Rollout MSE (10 steps)')
-        ax4.set_title('10-Step Rollout MSE Comparison')
-        ax4.tick_params(axis='x', rotation=45)
-        for bar, val in zip(bars4, valid_values):
-            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(valid_values)*0.01, 
-                    f'{val:.4f}', ha='center', va='bottom', fontsize=8)
-    else:
-        ax4.text(0.5, 0.5, 'No rollout data available', ha='center', va='center', 
-                transform=ax4.transAxes, fontsize=12)
-        ax4.set_title('10-Step Rollout MSE Comparison')
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"\nArchitecture comparison plot saved to: {save_path}")
-    plt.close(fig)
 
 
 # --- Main Execution ---
@@ -910,6 +1002,7 @@ if __name__ == "__main__":
     # --- Load Data ---
     try:
         X, y = load_and_prepare_data(TrainingConfig.REAL_DATASET_PATH)
+        sequences_X, sequences_y = create_sequence_dataset(TrainingConfig.REAL_DATASET_PATH, sequence_length=8)
     except FileNotFoundError:
         print(f"Error: The data file was not found at {TrainingConfig.REAL_DATASET_PATH}")
         print("Please create the file or update the path in the TrainingConfig class.")
@@ -921,6 +1014,7 @@ if __name__ == "__main__":
     print(f"Total samples loaded: {len(X)}")
     print(f"Shape of input features (X): {X.shape}")
     print(f"Shape of target features (y): {y.shape}")
+    print(f"Total sequences loaded: {len(sequences_X)}")
     
     # --- Split Data (using a fixed random_state is crucial for reproducibility) ---
     X_train_val, X_test, y_train_val, y_test = train_test_split(
@@ -930,9 +1024,28 @@ if __name__ == "__main__":
         X_train_val, y_train_val, test_size=TrainingConfig.VAL_SIZE / (1 - TrainingConfig.TEST_SIZE), random_state=42
     )
 
+    # Split sequence data
+    seq_train_val, seq_test = train_test_split(
+        list(zip(sequences_X, sequences_y)), test_size=TrainingConfig.TEST_SIZE, random_state=42
+    )
+    seq_train, seq_val = train_test_split(
+        seq_train_val, test_size=TrainingConfig.VAL_SIZE / (1 - TrainingConfig.TEST_SIZE), random_state=42
+    )
+    
+    # Separate sequences back
+    seq_X_train, seq_y_train = zip(*seq_train) if seq_train else ([], [])
+    seq_X_val, seq_y_val = zip(*seq_val) if seq_val else ([], [])
+    
+    seq_X_train = np.array(seq_X_train) if seq_X_train else np.array([])
+    seq_y_train = np.array(seq_y_train) if seq_y_train else np.array([])
+    seq_X_val = np.array(seq_X_val) if seq_X_val else np.array([])
+    seq_y_val = np.array(seq_y_val) if seq_y_val else np.array([])
+
     print(f"Training samples:   {len(X_train)}")
     print(f"Validation samples: {len(X_val)}")
     print(f"Test samples:       {len(X_test)}")
+    print(f"Training sequences: {len(seq_X_train)}")
+    print(f"Validation sequences: {len(seq_X_val)}")
     
     if len(X_train) == 0 or len(X_val) == 0 or len(X_test) == 0:
         raise ValueError("One of the data splits resulted in zero samples. Check your data size and split ratios.")
@@ -949,12 +1062,36 @@ if __name__ == "__main__":
     y_val_scaled = output_scaler.transform(y_val)
     print("Data scaled successfully.")
     
+    # Scale sequence data
+    if len(seq_X_train) > 0:
+        # Reshape for scaling: (n_sequences, seq_len, features) -> (n_sequences * seq_len, features)
+        seq_X_train_reshaped = seq_X_train.reshape(-1, seq_X_train.shape[-1])
+        seq_X_train_scaled = input_scaler.transform(seq_X_train_reshaped)
+        seq_X_train_scaled = seq_X_train_scaled.reshape(seq_X_train.shape)
+        
+        seq_y_train_reshaped = seq_y_train.reshape(-1, seq_y_train.shape[-1])
+        seq_y_train_scaled = output_scaler.transform(seq_y_train_reshaped)
+        seq_y_train_scaled = seq_y_train_scaled.reshape(seq_y_train.shape)
+        
+        print("Sequence data scaled successfully.")
+    else:
+        seq_X_train_scaled = np.array([])
+        seq_y_train_scaled = np.array([])
+    
     # --- Create DataLoaders ---
     train_dataset = RobotStateDataset(X_train_scaled, y_train_scaled)
     val_dataset = RobotStateDataset(X_val_scaled, y_val_scaled)
 
     train_loader = DataLoader(train_dataset, batch_size=TrainingConfig.BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=TrainingConfig.BATCH_SIZE, shuffle=False)
+
+    # Create sequence dataloaders
+    if len(seq_X_train_scaled) > 0:
+        sequence_dataset = RobotSequenceDataset(seq_X_train_scaled, seq_y_train)  # Don't scale y for sequences
+        sequence_loader = DataLoader(sequence_dataset, batch_size=TrainingConfig.BATCH_SIZE // 2, shuffle=True)
+    else:
+        # Create empty loader if no sequences
+        sequence_loader = DataLoader([], batch_size=1)
 
     # --- Initialize device and dimensions ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -964,85 +1101,41 @@ if __name__ == "__main__":
     output_dim = y_train.shape[1]
     print(f"Input dimension: {input_dim}, Output dimension: {output_dim}")
 
-    # --- Save scalers (shared across all models) ---
+    # --- Save scalers ---
     joblib.dump(input_scaler, TrainingConfig.INPUT_SCALER_PATH)
     joblib.dump(output_scaler, TrainingConfig.OUTPUT_SCALER_PATH)
     print(f"Input scaler saved to {TrainingConfig.INPUT_SCALER_PATH}")
     print(f"Output scaler saved to {TrainingConfig.OUTPUT_SCALER_PATH}")
 
-    # --- Define all architectures to train ---
-    architectures = [
-        ("Baseline", BaselineStatePredictor),
-        ("Residual", ResidualStatePredictor),
-        ("Physics Informed", PhysicsInformedPredictor),
-        ("Wide Network", WideStatePredictor),
-        ("Multi Scale", MultiScalePredictor),
-        ("SiLU Activation", SiLUStatePredictor)
-    ]
-    
-    # --- Train and evaluate all architectures ---
-    all_results = []
-    
-    for arch_name, arch_class in architectures:
-        try:
-            result = train_and_evaluate_architecture(
-                arch_name, arch_class, input_dim, output_dim,
-                train_loader, val_loader, X_test, y_test,
-                input_scaler, output_scaler, device, args
-            )
-            all_results.append(result)
-        except Exception as e:
-            print(f"Error training {arch_name}: {e}")
-            print("Continuing with next architecture...")
-            continue
-    
-    # --- Generate comparison plots and summary ---
-    if len(all_results) > 0:
+    # --- Train and evaluate the Enhanced Temporal Multi-Scale architecture ---
+    try:
+        result = train_and_evaluate_architecture(
+            "Enhanced Temporal Multi-Scale", StatePredictor, input_dim, output_dim,
+            train_loader, val_loader, sequence_loader, X_test, y_test,
+            input_scaler, output_scaler, device, args
+        )
+        
         print(f"\n{'='*80}")
-        print("SUMMARY OF ALL ARCHITECTURES")
+        print("ENHANCED TEMPORAL MULTI-SCALE RESULTS")
         print(f"{'='*80}")
         
-        # Print summary table
-        print(f"{'Architecture':<20} {'MSE':<12} {'MAE':<12} {'R²':<10} {'10-step Rollout MSE':<20}")
-        print("-" * 80)
+        print(f"Single-step Performance:")
+        print(f"  MSE: {result['mse']:.6f}")
+        print(f"  MAE: {result['mae']:.6f}")
+        print(f"  R²:  {result['r2']:.4f}")
         
-        for result in all_results:
-            rollout_mse_10 = "N/A"
-            if 'rollout_results' in result and result['rollout_results']:
-                rollout_res = result['rollout_results']
-                if 10 in rollout_res['horizons']:
-                    idx = rollout_res['horizons'].index(10)
-                    rollout_mse_10 = f"{rollout_res['avg_mse'][idx]:.6f}"
-            
-            print(f"{result['architecture']:<20} {result['mse']:<12.6f} {result['mae']:<12.6f} "
-                  f"{result['r2']:<10.4f} {rollout_mse_10:<20}")
+        if 'rollout_results' in result and result['rollout_results']:
+            rollout_res = result['rollout_results']
+            print(f"\nMulti-step Rollout Performance:")
+            for horizon, mse_val in zip(rollout_res['horizons'], rollout_res['avg_mse']):
+                print(f"  {horizon:2d}-step MSE: {mse_val:.6f}")
+                
+        print(f"\nModel saved to: {result['model_path']}")
+        print(f"Plots saved to: {os.path.dirname(result['plot_path'])}")
+        print("Enhanced training and evaluation completed successfully!")
         
-        # Generate architecture comparison plot
-        comparison_plot_path = TrainingConfig.PLOT_OUTPUT_PATH.replace('.png', '_architecture_comparison.png')
-        compare_architectures_performance(all_results, comparison_plot_path)
-        
-        # Find best performing architectures
-        best_mse = min(all_results, key=lambda x: x['mse'])
-        best_r2 = max(all_results, key=lambda x: x['r2'])
-        
-        print(f"\nBest MSE: {best_mse['architecture']} (MSE: {best_mse['mse']:.6f})")
-        print(f"Best R²:  {best_r2['architecture']} (R²: {best_r2['r2']:.4f})")
-        
-        if args.rollouts_eval:
-            # Find best rollout performance
-            rollout_results_valid = [r for r in all_results if 'rollout_results' in r and r['rollout_results']]
-            if rollout_results_valid:
-                best_rollout = min(rollout_results_valid, 
-                                 key=lambda x: x['rollout_results']['avg_mse'][x['rollout_results']['horizons'].index(10)] 
-                                 if 10 in x['rollout_results']['horizons'] else float('inf'))
-                if 10 in best_rollout['rollout_results']['horizons']:
-                    idx = best_rollout['rollout_results']['horizons'].index(10)
-                    best_rollout_mse = best_rollout['rollout_results']['avg_mse'][idx]
-                    print(f"Best 10-step Rollout: {best_rollout['architecture']} (MSE: {best_rollout_mse:.6f})")
-        
-        print(f"\nAll models and plots saved to: {os.path.dirname(TrainingConfig.MODEL_PATH)}")
-        print("Training and evaluation completed successfully!")
-        
-    else:
-        print("No architectures were successfully trained!")
+    except Exception as e:
+        print(f"Error training Enhanced Temporal Multi-Scale: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
