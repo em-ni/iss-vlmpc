@@ -1,14 +1,18 @@
 import cv2
 import os
-
+import platform
 
 def take_photo(cam_index):
     save_dir = os.path.join(".", "data", "test")
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    # cap = cv2.VideoCapture(cam_index)
-    cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+    # Detect OS
+    system = platform.system()
+    if system == "Windows":
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+    else:  # Linux, macOS, etc.
+        cap = cv2.VideoCapture(cam_index)
 
     if not cap.isOpened():
         print("Error: Cannot access the camera")
@@ -29,5 +33,5 @@ def take_photo(cam_index):
 
 
 if __name__ == "__main__":
-    cam_index = 0
+    cam_index = 3
     take_photo(cam_index)

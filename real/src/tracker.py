@@ -7,13 +7,18 @@ import cv2
 import numpy as np
 import yaml
 import csv
+import platform
 import src.config as config
 # import config as config
 
 # Threaded camera stream for fast frame grabbing
 class CameraStream:
     def __init__(self, cam_index):
-        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        system = platform.system()
+        if system == "Windows":
+            self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        else:
+            self.cap = cv2.VideoCapture(cam_index)
         self.ret = False
         self.frame = None
         self.running = True
@@ -231,7 +236,10 @@ class Tracker:
         cur_tip_pos = self.get_current_tip()
         cur_tip_vel = self.get_current_tip_vel()
         last_timestamp = self.last_timestamp
-        return np.array([*cur_tip_pos, *cur_tip_vel, last_timestamp])
+        # Flatten to ensure 1D arrays of scalars
+        cur_tip_pos_flat = cur_tip_pos.flatten() if cur_tip_pos is not None else np.zeros(3)
+        cur_tip_vel_flat = cur_tip_vel.flatten() if cur_tip_vel is not None else np.zeros(3)
+        return np.array([*cur_tip_pos_flat, *cur_tip_vel_flat, last_timestamp])
 
     def get_image_from_csv(self, img_path):
         """
@@ -528,8 +536,13 @@ class Tracker:
         Function to track the robot in real-time
         """
         # Initialize the camera
-        cap_left = cv2.VideoCapture(self.cam_left_index, cv2.CAP_DSHOW)
-        cap_right = cv2.VideoCapture(self.cam_right_index, cv2.CAP_DSHOW)
+        system = platform.system()
+        if system == "Windows":
+            cap_left = cv2.VideoCapture(self.cam_left_index, cv2.CAP_DSHOW)
+            cap_right = cv2.VideoCapture(self.cam_right_index, cv2.CAP_DSHOW)
+        else:
+            cap_left = cv2.VideoCapture(self.cam_left_index)
+            cap_right = cv2.VideoCapture(self.cam_right_index)
 
         if not cap_left.isOpened() or not cap_right.isOpened():
             print("Error: Couldn't open the cameras.")

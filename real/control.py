@@ -33,7 +33,7 @@ APPROXIMATION_ORDER = 2
 # Real robot parameters
 simulation_params = {
     'mpc_dt': 0.1,     # 10Hz
-    'vlm_dt': 1.0      # 1Hz
+    'vlm_dt': 10.0      # 1Hz
 }
 
 class ThreadedRobotController:
@@ -107,7 +107,7 @@ class ThreadedRobotController:
         """Dedicated thread for VLM processing at 1Hz"""
         print("VLM worker thread started")
         target_dt = simulation_params['vlm_dt'] 
-        
+        saved_first_image = False
         while not self.quit:
             cycle_start_time = time.time()
             
@@ -121,6 +121,12 @@ class ThreadedRobotController:
                 
                 # Generate scene image (you'll need to implement this based on your setup)
                 scene_image = self.vlm.ingest_info_real(current_state)
+
+                # Save first scene image for debugging
+                if not saved_first_image and scene_image is not None:
+                    self.vlm.save_scene_image(filename='initial_vlm_view.png')
+                    print("Initial scene image saved as 'initial_vlm_view.png'")
+                    saved_first_image = True
 
                 # Process any pending user input
                 new_trajectory, target_name = self.vlm.process_user_input(current_state, scene_image)
@@ -207,6 +213,7 @@ class ThreadedRobotController:
                 state = state_with_timestamp[:-1]  # Exclude timestamp
                 with self.state_lock:
                     self.current_state = state
+                    # print(f"Updated state: {self.current_state}")
         except Exception as e:
             print(f"Error updating state from tracker: {e}")
 
@@ -251,11 +258,14 @@ def main():
         # Initialize VLM if needed
         if CONTROL_MODE == "vlm":
             print("Initializing VLM...")
-            controller.vlm = VLM(vlm_dt=simulation_params['vlm_dt'], 
-                               mpc_dt=simulation_params['mpc_dt'], 
-                               backend="gemini", 
-                               model_name="gemini-2.5-pro", 
-                               web_ui=True)
+            controller.vlm = VLM(
+                sim=False,
+                vlm_dt=simulation_params['vlm_dt'],
+                mpc_dt=simulation_params['mpc_dt'],
+                backend="gemini",
+                model_name="gemini-2.5-pro",
+                web_ui=True
+            )
 
             if not controller.vlm.check_server():
                 print("Warning: VLM server not running! Switching to set point regulation mode.")
@@ -288,8 +298,8 @@ def main():
             # Update state from tracker
             controller.update_state_from_tracker()
             
-            # Send robot command at high frequency
-            controller.send_robot_command()
+            # # Send robot command at high frequency
+            # controller.send_robot_command()
             
             # Time-compensated sleep for main loop
             elapsed = time.time() - loop_start_time

@@ -14,7 +14,7 @@ import os
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from .VLMWebUI import VLMWebUI
+from VLMWebUI import VLMWebUI
 
 """
 For Llama.cpp:
@@ -27,7 +27,7 @@ Add G_API_KEY=your-api-key to .env file
 """
 
 class VLM:
-    def __init__(self, server_url="http://localhost:8080", vlm_dt=1.0, mpc_dt=0.02, backend="llama", model_name="gemini-2.5-pro", web_ui=True):
+    def __init__(self, sim=True,server_url="http://localhost:8080", vlm_dt=1.0, mpc_dt=0.02, backend="llama", model_name="gemini-2.5-pro", web_ui=True):
         """
         Vision Language Model interface for dynamic target assignment.
         
@@ -98,9 +98,14 @@ class VLM:
         self.waypoints = []  # Store waypoints from VLM
 
         # Visualization parameters for scene reconstruction
-        self.xlim = (-1.0, 1.0)
-        self.ylim = (-1.0, 1.0)
-        self.zlim = (-1.0, 1.0)
+        if sim:
+            self.xlim = (-1.0, 1.0)
+            self.ylim = (-1.0, 1.0)
+            self.zlim = (-1.0, 1.0)
+        else:
+            self.xlim = (0.2, 2.5)
+            self.ylim = (-2.0, 1.0)
+            self.zlim = (-2.0, 1.0)
         self.colors = ['red', 'blue', 'orange', 'purple']
         
         # System prompt for the VLM
@@ -136,14 +141,120 @@ class VLM:
 
     def ingest_info_real(self, current_state):
         """
-        Based on the current state generate the planar view
+        Based on the current state generate the 4 views: XY, XZ, YZ and 3D.
+        Combine them in a single plot with 4 subplots
         """
-        pos = current_state[:3]
-        if self.waypoints:
-            waypoints = self.waypoints
-        pass
+        try:
+            pos = current_state[:3]
+            pos[0] = 1.0
+            print(f"Generating scene image at position: {pos}")
+            
+            # Handle waypoints properly
+            waypoints_3d = []
+            if self.waypoints and len(self.waypoints) >= 2:
+                try:
+                    # Convert waypoints from string list to numpy array
+                    waypoint_coords = [float(wp) for wp in self.waypoints]
+                    # Ensure we have pairs of coordinates
+                    if len(waypoint_coords) % 2 == 0:
+                        waypoints_2d = np.array(waypoint_coords).reshape(-1, 2)
+                        # Add Z coordinate (assume 0.0 as default)
+                        waypoints_3d = np.column_stack([waypoints_2d, np.full(waypoints_2d.shape[0], 0.0)])
+                except (ValueError, IndexError) as e:
+                    print(f"Error processing waypoints: {e}")
+                    waypoints_3d = []
 
+            # Generate the 4 views
+            fig, axs = plt.subplots(2, 2, figsize=(12, 12))
+            fig.suptitle("Current State Views", fontsize=16)
 
+            # XY View (Top)
+            axs[0, 0].scatter(pos[0], pos[1], c='red', s=100, label='Current Position', 
+                            edgecolors='black', linewidth=2, zorder=5)
+            if len(waypoints_3d) > 0:
+                axs[0, 0].scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], c='blue', s=50, 
+                                label='Waypoints', alpha=0.7, zorder=4)
+            axs[0, 0].set_title("XY View (Top)", fontsize=12)
+            axs[0, 0].set_xlabel("X (m)")
+            axs[0, 0].set_ylabel("Y (m)")
+            axs[0, 0].set_xlim(self.xlim)
+            axs[0, 0].set_ylim(self.ylim)
+            axs[0, 0].grid(True, alpha=0.3)
+            axs[0, 0].legend()
+            axs[0, 0].set_aspect('equal')
+
+            # XZ View (Side)
+            axs[0, 1].scatter(pos[0], pos[2], c='red', s=100, label='Current Position', 
+                            edgecolors='black', linewidth=2, zorder=5)
+            if len(waypoints_3d) > 0:
+                axs[0, 1].scatter(waypoints_3d[:, 0], waypoints_3d[:, 2], c='blue', s=50, 
+                                label='Waypoints', alpha=0.7, zorder=4)
+            axs[0, 1].set_title("XZ View (Side)", fontsize=12)
+            axs[0, 1].set_xlabel("X (m)")
+            axs[0, 1].set_ylabel("Z (m)")
+            axs[0, 1].set_xlim(self.xlim)
+            axs[0, 1].set_ylim(self.zlim)
+            axs[0, 1].grid(True, alpha=0.3)
+            axs[0, 1].legend()
+            axs[0, 1].set_aspect('equal')
+
+            # YZ View (Front)
+            axs[1, 0].scatter(pos[1], pos[2], c='red', s=100, label='Current Position', 
+                            edgecolors='black', linewidth=2, zorder=5)
+            if len(waypoints_3d) > 0:
+                axs[1, 0].scatter(waypoints_3d[:, 1], waypoints_3d[:, 2], c='blue', s=50, 
+                                label='Waypoints', alpha=0.7, zorder=4)
+            axs[1, 0].set_title("YZ View (Front)", fontsize=12)
+            axs[1, 0].set_xlabel("Y (m)")
+            axs[1, 0].set_ylabel("Z (m)")
+            axs[1, 0].set_xlim(self.ylim)
+            axs[1, 0].set_ylim(self.zlim)
+            axs[1, 0].grid(True, alpha=0.3)
+            axs[1, 0].legend()
+            axs[1, 0].set_aspect('equal')
+
+            # 3D View
+            ax_3d = fig.add_subplot(224, projection='3d')
+            ax_3d.scatter(pos[0], pos[1], pos[2], c='red', s=100, label='Current Position', 
+                        edgecolors='black', linewidth=2, zorder=5)
+            
+            if len(waypoints_3d) > 0:
+                ax_3d.scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], waypoints_3d[:, 2], 
+                            c='blue', s=50, label='Waypoints', alpha=0.7, zorder=4)
+                
+                # Draw trajectory line if waypoints exist
+                trajectory_points = np.vstack([pos.reshape(1, -1), waypoints_3d])
+                ax_3d.plot(trajectory_points[:, 0], trajectory_points[:, 1], trajectory_points[:, 2], 
+                        'b--', alpha=0.5, linewidth=2, label='Planned Path', zorder=3)
+            
+            ax_3d.set_title("3D View", fontsize=12)
+            ax_3d.set_xlabel("X (m)")
+            ax_3d.set_ylabel("Y (m)")
+            ax_3d.set_zlabel("Z (m)")
+            ax_3d.set_xlim(self.xlim)
+            ax_3d.set_ylim(self.ylim)
+            ax_3d.set_zlim(self.zlim)
+            ax_3d.legend()
+
+            plt.tight_layout()
+            
+            # Convert to base64 encoded image
+            buffer = BytesIO()
+            plt.savefig(buffer, format='png', dpi=100, bbox_inches='tight')
+            buffer.seek(0)
+            image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            
+            plt.close(fig)  # Clean up to prevent memory leaks
+            
+            # Store for later use
+            self.current_scene_image = image_base64
+            
+            return image_base64
+            
+        except Exception as e:
+            print(f"Error creating real scene image: {e}")
+            return None
+        
     def ingest_info_sim(self, sim_data, current_target=None, tip_history=None, target_history=None):
         """
         Create visual representation of the current scene for VLM processing.
