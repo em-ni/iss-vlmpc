@@ -1,4 +1,4 @@
-# mpc_casadi_sim.py
+# mpc_casadi_real.py
 import sys
 import time
 import pandas as pd
@@ -10,31 +10,33 @@ import matplotlib.pyplot as plt
 from scipy.linalg import solve_discrete_are
 
 # Import exactly as requested
-from model.train_sim import StatePredictor, TrainingConfig as TrainConfig
+from model.train_robot import StatePredictor, TrainingConfig as TrainConfig
 
 # --- Configuration ---
 class MPCConfig:
     MODEL_PATH = TrainConfig.MODEL_PATH
     INPUT_SCALER_PATH = TrainConfig.INPUT_SCALER_PATH
     OUTPUT_SCALER_PATH = TrainConfig.OUTPUT_SCALER_PATH
-    SIM_DATASET_PATH = TrainConfig.SIM_DATASET_PATH
-    N = 15
+    REAL_DATASET_PATH = TrainConfig.REAL_DATASET_PATH
+    N = 2
     DT = 0.020
     SIM_TIME = 10.0
     q_pos = 10.0 #10.0
     q_vel = 0.0 #0.0
     Q_diag = [q_pos, q_pos, q_pos, q_vel, q_vel, q_vel]
-    r_diag = 100.0 #100.0
-    R_diag = [r_diag, r_diag, r_diag, r_diag]  
-    r_rate_diag = 150000.0 #150000.0
-    R_rate_diag = [r_rate_diag, r_rate_diag, r_rate_diag, r_rate_diag] 
+    r_diag = 1.0 #100.0
+    R_diag = [r_diag, r_diag, r_diag]  
+    r_rate_diag = 0.0 #150000.0
+    R_rate_diag = [r_rate_diag, r_rate_diag, r_rate_diag] 
     LAMBDA = 50.0 #50
-    max_torque = 9e-2
-    U_MIN = [-max_torque, -max_torque, -max_torque, -max_torque]
-    U_MAX = [max_torque, max_torque, max_torque, max_torque]
+
+    min_volume= 115.0
+    max_volume = 120.0
+    U_MIN = [min_volume, min_volume, min_volume]
+    U_MAX = [max_volume, max_volume, max_volume]
     # Workspace box constraints: x, y, z, x_dot, y_dot, z_dot
-    X_MAX = [0.6, 0.6, 0.8, 0.2, 0.2, 0.2]
-    X_MIN = [-0.6, -0.6, 0.0, -0.2, -0.2, -0.2]
+    X_MAX = [2.4, 0.7, 0.8, 20.0, 20.0, 20.0]
+    X_MIN = [0.36, -1.8, -1.6, -20.0, -20.0, -20.0]
 
     def stability_check(self):
         """
@@ -66,7 +68,7 @@ class MPCConfig:
         The discussion above guarantees ISS inside a region of attraction around the reference, the size of this can be regulated by tuning lambda (Limon et al., "On the stability of constrained MPC without terminal constraint")
 
         In conclusion, if the cost is chosen such that A1 and A2 hold, the NN is chosen and trained such that A3 and A4 holds, the stability check requires to verify that for the parameters Q and R, LAMBDA is large enough to ensure x_0 is inside the region of attraction
-        This is done in find_stabilizing_lambda, where the minimum LAMBDA is computed.
+        This is done in find stabilizing lambda, where the minimum LAMBDA is computed.
         """
         # Placeholder for stability check logic
         return True
@@ -84,9 +86,8 @@ class MPCController:
         """
         self.nn_approximation_order = nn_approximation_order
         self.n_states = 6
-        self.n_controls = 4
-        self.state_cols = ['tip_position_x', 'tip_position_y', 'tip_position_z', 
-                          'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
+        self.n_controls = 3
+        self.state_cols = ['tip_x', 'tip_y', 'tip_z', 'tip_velocity_x', 'tip_velocity_y', 'tip_velocity_z']
         self.LAMBDA = MPCConfig.LAMBDA
 
         # Initialize model and scalers
@@ -115,10 +116,12 @@ class MPCController:
         """Load simulation model assets"""
         print("\nLoading simulation model assets")
         try:
-            self.df = pd.read_csv(MPCConfig.SIM_DATASET_PATH)
+            self.df = pd.read_csv(MPCConfig.REAL_DATASET_PATH)
+            # Clean column names (remove units in parentheses)
+            self.df.columns = self.df.columns.str.strip().str.replace(' \(.*\)', '', regex=True)
             self.df.columns = self.df.columns.str.strip()
             
-            self.model = StatePredictor(input_dim=10, output_dim=6)
+            self.model = StatePredictor(input_dim=9, output_dim=6)
             self.model.load_state_dict(torch.load(MPCConfig.MODEL_PATH))
             self.model.eval()  # Set to evaluation mode
             
@@ -457,7 +460,7 @@ class MPCController:
         for k in range(MPCConfig.N):
             if self.nn_approximation_order >= 1:
                 J_k = J_batch[k]
-                B_k = J_k[:, :self.n_controls]  # First 4 columns for torque inputs
+                B_k = J_k[:, :self.n_controls]  # First 3 columns for volume inputs
                 A_k = J_k[:, self.n_controls:self.n_controls+self.n_states]  # Next 6 columns for states
                 C_k = y_pred_batch[k] - A_k @ x_guess_np[k] - B_k @ self.u_guess[:, k]
                 
@@ -593,18 +596,17 @@ class MPCController:
         # Control input plot
         if history_u.size > 0:
             time_axis_u = np.arange(history_u.shape[0]) * MPCConfig.DT
-            axs[2].step(time_axis_u, history_u[:, 0], where='post', label='Rod1 Torque X')
-            axs[2].step(time_axis_u, history_u[:, 1], where='post', label='Rod1 Torque Y')
-            axs[2].step(time_axis_u, history_u[:, 2], where='post', label='Rod2 Torque X')
-            axs[2].step(time_axis_u, history_u[:, 3], where='post', label='Rod2 Torque Y')
-        axs[2].set_ylabel('Torque Input')
+            axs[2].step(time_axis_u, history_u[:, 0], where='post', label='Volume 1')
+            axs[2].step(time_axis_u, history_u[:, 1], where='post', label='Volume 2')
+            axs[2].step(time_axis_u, history_u[:, 2], where='post', label='Volume 3')
+        axs[2].set_ylabel('Volume Input')
         axs[2].set_xlabel('Time (s)')
         axs[2].set_title('MPC Control Inputs')
         axs[2].legend()
         axs[2].grid(True)
         
         plt.tight_layout()
-        plot_path = f'results/mpc_casadi_sim_order_{self.nn_approximation_order}.png'
+        plot_path = f'results/mpc_casadi_real_order_{self.nn_approximation_order}.png'
         plt.savefig(plot_path)
         print(f"\nMPC trajectory plot saved as '{plot_path}'.")
         
@@ -685,4 +687,4 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
 if __name__ == "__main__":
     mode = 'spr' # set point regulation
     # mode = 'tt' # trajectory tracking
-    run_mpc_simulation(mode=mode, nn_approximation_order=1)
+    run_mpc_simulation(mode=mode, nn_approximation_order=2)
