@@ -28,7 +28,7 @@ from VLM import VLM
 # Simulation settings
 FINAL_TIME = 10.0
 CONTROL_MODE = "vlm"  # set point regulation, "tt" for trajectory tracking, "vlm" for VLM control
-APPROXIMATION_ORDER = 1
+APPROXIMATION_ORDER = 2
 
 # Real robot parameters
 simulation_params = {
@@ -120,8 +120,8 @@ class ThreadedRobotController:
                     continue
                 
                 # Generate scene image (you'll need to implement this based on your setup)
-                scene_image = self.generate_scene_image(current_state)
-                
+                scene_image = self.vlm.ingest_info_real(current_state)
+
                 # Process any pending user input
                 new_trajectory, target_name = self.vlm.process_user_input(current_state, scene_image)
                 
@@ -198,19 +198,6 @@ class ThreadedRobotController:
                 time.sleep(remaining_time)
             else:
                 print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
-
-    def generate_scene_image(self, current_state):
-        """
-        Generate scene image for VLM processing.
-        You'll need to implement this based on your robot setup.
-        This could involve:
-        - Capturing camera images
-        - Creating a synthetic scene representation
-        - Using existing camera data from tracker
-        """
-        # Placeholder - implement based on your needs
-        # This might capture real camera images or create a synthetic representation
-        return None
 
     def update_state_from_tracker(self):
         """Update shared state from tracker data"""

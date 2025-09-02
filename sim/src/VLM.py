@@ -104,7 +104,9 @@ class VLM:
         self.colors = ['red', 'blue', 'orange', 'purple']
         
         # System prompt for the VLM
-        with open(os.path.join(os.path.dirname(__file__), "prompt.txt"), "r") as f:
+        # prompt_filename = "prompt_sim.txt"
+        prompt_filename = "prompt_real.txt"
+        with open(os.path.join(os.path.dirname(__file__), prompt_filename), "r") as f:
             self.system_prompt = f.read()
             
     def check_server(self):
@@ -131,6 +133,16 @@ class VLM:
                 print(f"Gemini connection test failed: {e}")
                 return False
         return False
+
+    def ingest_info_real(self, current_state):
+        """
+        Based on the current state generate the planar view
+        """
+        pos = current_state[:3]
+        if self.waypoints:
+            waypoints = self.waypoints
+        pass
+
 
     def ingest_info_sim(self, sim_data, current_target=None, tip_history=None, target_history=None):
         """
