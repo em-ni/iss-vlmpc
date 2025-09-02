@@ -1,11 +1,19 @@
+import socket
+import struct
 import sys
 import os
+import threading
 import time
 import numpy as np
+from queue import Queue, Empty
 
 # Local imports
+import src.config as config
+from src.tracker import Tracker
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
+
+# Add MPC project path
 mpc_project_path = os.path.join(project_root, 'PSS-VLMPC', 'generic-neural-mpc')
 if mpc_project_path not in sys.path:
     sys.path.append(mpc_project_path)
@@ -19,177 +27,330 @@ from VLM import VLM
 
 # Simulation settings
 FINAL_TIME = 10.0
-CONTROL_MODE = "spr"  # set point regulation, "tt" for trajectory tracking, "vlm" for VLM control
+CONTROL_MODE = "vlm"  # set point regulation, "tt" for trajectory tracking, "vlm" for VLM control
 APPROXIMATION_ORDER = 1
 
-# Real robot parameters (adjust based on your robot specs)
-robot_params = {
-    'mpc_dt': 0.02,
-    'control_frequency': 50  # Hz
+# Real robot parameters
+simulation_params = {
+    'mpc_dt': 0.1,     # 10Hz
+    'vlm_dt': 1.0      # 1Hz
 }
-vlm_dt = 2.0
 
-def get_robot_state():
-    """
-    Get current robot state (tip position and velocity).
-    This function should be implemented to interface with your real robot.
+class ThreadedRobotController:
+    def __init__(self):
+        # Control flags
+        self.quit = False
+        
+        # Thread-safe data sharing
+        self.state_lock = threading.Lock()
+        self.trajectory_lock = threading.Lock()
+        self.control_lock = threading.Lock()
+        
+        # Shared state variables
+        self.current_state = None
+        self.current_control = None
+        self.vlm_trajectory = None
+        self.vlm_trajectory_index = 0
+        self.vlm_target_name = None
+        
+        # Components
+        self.tracker = None
+        self.mpc = None
+        self.vlm = None
+        
+        # Threads
+        self.tracker_thread = None
+        self.vlm_thread = None
+        self.mpc_thread = None
+        
+        # History for plotting
+        self.history_x = []
+        self.history_u = []
+        self.history_x_target = []
+        self.history_mpc_times = []
+        
+    def get_current_state_safe(self):
+        """Thread-safe getter for current state"""
+        with self.state_lock:
+            return self.current_state.copy() if self.current_state is not None else None
     
-    Returns:
-        np.array: [tip_x, tip_y, tip_z, tip_vel_x, tip_vel_y, tip_vel_z]
-    """
-    # TODO: Implement actual robot state acquisition
-    # This is a placeholder - replace with actual robot interface
-    return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    def update_vlm_trajectory_safe(self, new_trajectory, target_name):
+        """Thread-safe setter for VLM trajectory"""
+        with self.trajectory_lock:
+            self.vlm_trajectory = new_trajectory
+            self.vlm_trajectory_index = 0
+            self.vlm_target_name = target_name
+            
+    def get_vlm_target_safe(self):
+        """Thread-safe getter for current VLM target"""
+        with self.trajectory_lock:
+            if self.vlm_trajectory is not None:
+                if self.vlm_trajectory_index < len(self.vlm_trajectory):
+                    target = self.vlm_trajectory[self.vlm_trajectory_index].copy()
+                    self.vlm_trajectory_index += 1
+                    return target
+                else:
+                    return self.vlm_trajectory[-1].copy()
+            return None
+    
+    def update_control_safe(self, control):
+        """Thread-safe setter for control command"""
+        with self.control_lock:
+            self.current_control = control.copy()
+            
+    def get_control_safe(self):
+        """Thread-safe getter for control command"""
+        with self.control_lock:
+            return self.current_control.copy() if self.current_control is not None else None
 
-def send_robot_command(volumes):
-    """
-    Send volume commands to the real robot.
-    
-    Args:
-        volumes (np.array): [volume1, volume2, volume3]
-    """
-    # TODO: Implement actual robot command interface
-    # This is a placeholder - replace with actual robot interface
-    print(f"Sending volumes: {volumes}")
-    pass
+    def vlm_worker_thread(self):
+        """Dedicated thread for VLM processing at 1Hz"""
+        print("VLM worker thread started")
+        target_dt = simulation_params['vlm_dt'] 
+        
+        while not self.quit:
+            cycle_start_time = time.time()
+            
+            try:
+                # Get current state (thread-safe)
+                current_state = self.get_current_state_safe()
+                if current_state is None:
+                    print("VLM: Waiting for initial state...")
+                    time.sleep(0.1)
+                    continue
+                
+                # Generate scene image (you'll need to implement this based on your setup)
+                scene_image = self.generate_scene_image(current_state)
+                
+                # Process any pending user input
+                new_trajectory, target_name = self.vlm.process_user_input(current_state, scene_image)
+                
+                if new_trajectory is not None:
+                    self.update_vlm_trajectory_safe(new_trajectory, target_name)
+                    print(f"VLM: New trajectory activated to reach: {target_name}")
+                
+            except Exception as e:
+                print(f"VLM thread error: {e}")
+                # Continue running even if VLM fails
+            
+            # Time-compensated sleep for 1Hz
+            elapsed = time.time() - cycle_start_time
+            remaining_time = target_dt - elapsed
+            if remaining_time > 0:
+                time.sleep(remaining_time)
+            else:
+                print(f"VLM: Processing took {elapsed:.3f}s, missed target of {target_dt}s")
+
+    def mpc_worker_thread(self):
+        """Dedicated thread for MPC processing
+        MPC computation takes ~70ms
+        """
+        print("MPC worker thread started")
+        target_dt = simulation_params['mpc_dt']  
+        
+        # Default target
+        x_target = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        
+        while not self.quit:
+            cycle_start_time = time.time()
+            
+            try:
+                # Get current state (thread-safe)
+                current_state = self.get_current_state_safe()
+                if current_state is None:
+                    print("MPC: Waiting for initial state...")
+                    time.sleep(0.1)
+                    continue
+                
+                # Update target from VLM if available
+                vlm_target = self.get_vlm_target_safe()
+                if vlm_target is not None:
+                    x_target = vlm_target
+                
+                # Compute MPC control
+                start_mpc_time = time.time()
+                u_mpc = self.mpc.step(x_target, current_state)
+                end_mpc_time = time.time()
+                
+                mpc_computation_time = end_mpc_time - start_mpc_time
+                self.history_mpc_times.append(mpc_computation_time)
+                
+                if u_mpc is None:
+                    print("MPC: Control computation failed")
+                    continue
+                
+                # Update control command (thread-safe)
+                self.update_control_safe(np.array(u_mpc))
+                
+                # Store history (you might want to make this thread-safe too)
+                self.history_x.append(current_state.copy())
+                self.history_u.append(u_mpc.copy())
+                self.history_x_target.append(x_target.copy())
+                
+            except Exception as e:
+                print(f"MPC thread error: {e}")
+                # Continue running even if MPC fails
+            
+            # Time-compensated sleep
+            elapsed = time.time() - cycle_start_time
+            remaining_time = target_dt - elapsed
+            if remaining_time > 0:
+                time.sleep(remaining_time)
+            else:
+                print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
+
+    def generate_scene_image(self, current_state):
+        """
+        Generate scene image for VLM processing.
+        You'll need to implement this based on your robot setup.
+        This could involve:
+        - Capturing camera images
+        - Creating a synthetic scene representation
+        - Using existing camera data from tracker
+        """
+        # Placeholder - implement based on your needs
+        # This might capture real camera images or create a synthetic representation
+        return None
+
+    def update_state_from_tracker(self):
+        """Update shared state from tracker data"""
+        try:
+            state_with_timestamp = self.tracker.get_current_state()
+            if state_with_timestamp is not None:
+                state = state_with_timestamp[:-1]  # Exclude timestamp
+                with self.state_lock:
+                    self.current_state = state
+        except Exception as e:
+            print(f"Error updating state from tracker: {e}")
+
+    def send_robot_command(self):
+        """Send control command to robot at high frequency"""
+        control = self.get_control_safe()
+        if control is not None:
+            # TODO: Implement actual robot command sending
+            # send_robot_command_implementation(control)
+            pass
+
+def send_quit_signal():
+    """Send a quit signal to the tracker via UDP."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    data = struct.pack('?', True)
+    sock.sendto(data, (config.UDP_IP, config.UDP_QUIT_TRACK_PORT))
+    sock.close()
+    print("Sent quit signal to tracker.")
 
 def main():
     global CONTROL_MODE
     
     print("Initializing Real Robot MPC Control...")
     
-    # Initialize MPC controller
-    print("Initializing MPC Controller...")
-    mpc = MPCController(nn_approximation_order=APPROXIMATION_ORDER)
-    
-    # Initialize VLM if needed
-    vlm = None
-    if CONTROL_MODE == "vlm":
-        print("Initializing VLM...")
-        vlm = VLM(vlm_dt=vlm_dt, mpc_dt=robot_params['mpc_dt'], backend="gemini", model_name="gemini-2.5-pro", web_ui=True)
-        
-        if not vlm.check_server():
-            print("Warning: VLM server not running! Switching to set point regulation mode.")
-            CONTROL_MODE = 'spr'
-        else:
-            print("VLM server connected successfully!")
-            vlm.start_input_thread()
-    
-    # Define targets
-    x_target = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Default target
-    
-    # Get initial state
-    x_current = get_robot_state()
-    print(f"Initial robot state: {x_current}")
-    
-    # Setup trajectory tracking if needed
-    reference_trajectory = None
-    ref_index = 0
-    if CONTROL_MODE == "tt":
-        # Generate reference trajectory
-        n_steps = int(FINAL_TIME / robot_params['mpc_dt'])
-        reference_trajectory = np.linspace(x_current, x_target, num=n_steps)
-        print(f"Generated reference trajectory with {n_steps} steps.")
-    
-    # VLM trajectory variables
-    vlm_trajectory = None
-    vlm_trajectory_index = 0
-    
-    # History variables
-    history_x, history_u = [], []
-    history_x_target = []
-    history_mpc_times = []
-    
-    # Control loop
-    print("Starting control loop...")
-    start_time = time.time()
-    step_count = 0
+    # Create controller instance
+    controller = ThreadedRobotController()
     
     try:
-        while time.time() - start_time < FINAL_TIME:
-            current_time = time.time() - start_time
-            
-            # VLM control updates
-            if CONTROL_MODE == 'vlm' and vlm and step_count % int(vlm_dt / robot_params['mpc_dt']) == 0:
-                # Get current state for VLM
-                x_current_vlm = get_robot_state()
+        # Initialize Tracker
+        print("Initializing Tracker...")
+        experiment_name = config.experiment_name
+        save_dir = config.save_dir
+        csv_path = config.csv_path
+        controller.tracker = Tracker(experiment_name, save_dir, csv_path, realtime=True)
+
+        # Start tracker in a thread
+        controller.tracker_thread = threading.Thread(target=controller.tracker.run_realtime_tracking, args=(True,))
+        controller.tracker_thread.start()
+        time.sleep(2)
+        print("Tracker thread started.")
+        
+        # Initialize VLM if needed
+        if CONTROL_MODE == "vlm":
+            print("Initializing VLM...")
+            controller.vlm = VLM(vlm_dt=simulation_params['vlm_dt'], 
+                               mpc_dt=simulation_params['mpc_dt'], 
+                               backend="gemini", 
+                               model_name="gemini-2.5-pro", 
+                               web_ui=True)
+
+            if not controller.vlm.check_server():
+                print("Warning: VLM server not running! Switching to set point regulation mode.")
+                CONTROL_MODE = 'spr'
+            else:
+                print("VLM server connected successfully!")
+                controller.vlm.start_input_thread()
                 
-                # Process VLM input with real scene context
-                # TODO: Implement real scene image capture
-                scene_image = vlm.ingest_real_scene_info(x_current_vlm)  # Assume this function exists
-                new_trajectory, target_name = vlm.process_user_input(x_current_vlm, scene_image)
-                
-                if new_trajectory is not None:
-                    vlm_trajectory = new_trajectory
-                    vlm_trajectory_index = 0
-                    print(f"New VLM trajectory activated to reach: {target_name}")
+                # Start VLM worker thread
+                controller.vlm_thread = threading.Thread(target=controller.vlm_worker_thread)
+                controller.vlm_thread.start()
+                print("VLM worker thread started.")
+
+        # Initialize MPC controller
+        print("Initializing MPC Controller...")
+        controller.mpc = MPCController(nn_approximation_order=APPROXIMATION_ORDER)
+
+        # Start MPC worker thread
+        controller.mpc_thread = threading.Thread(target=controller.mpc_worker_thread)
+        controller.mpc_thread.start()
+        print("MPC worker thread started.")
+        
+        # Main loop for high-frequency operations
+        print("Starting main control loop...")
+        main_loop_dt = 0.01  # 100Hz for robot command sending
+        
+        while True:
+            loop_start_time = time.time()
             
-            # Get current robot state
-            x_current = get_robot_state()
+            # Update state from tracker
+            controller.update_state_from_tracker()
             
-            # Determine target based on control mode
-            if CONTROL_MODE == 'vlm' and vlm_trajectory is not None:
-                if vlm_trajectory_index < len(vlm_trajectory):
-                    x_target = vlm_trajectory[vlm_trajectory_index]
-                    vlm_trajectory_index += 1
-                else:
-                    x_target = vlm_trajectory[-1]
-            elif CONTROL_MODE == "tt" and reference_trajectory is not None:
-                if ref_index < len(reference_trajectory):
-                    x_target = reference_trajectory[ref_index]
-                    ref_index += 1
-                else:
-                    x_target = reference_trajectory[-1]
+            # Send robot command at high frequency
+            controller.send_robot_command()
             
-            # Get MPC control input
-            start_mpc_time = time.time()
-            u_mpc = mpc.step(x_target, x_current)
-            end_mpc_time = time.time()
-            history_mpc_times.append(end_mpc_time - start_mpc_time)
-            
-            if u_mpc is None:
-                print(f"MPC failed at step {step_count}")
-                break
-            
-            # Send command to robot
-            send_robot_command(u_mpc)
-            
-            # Store history
-            history_x.append(x_current.copy())
-            history_u.append(u_mpc.copy())
-            history_x_target.append(x_target.copy())
-            
-            # Status update
-            if step_count % 25 == 0:  # Print every 0.5 seconds at 50Hz
-                dist_to_target = np.linalg.norm(x_current[:3] - x_target[:3])
-                print(f"Step {step_count}, Time: {current_time:.2f}s, Distance to target: {dist_to_target:.4f}")
-            
-            # Wait for next control cycle
-            time.sleep(robot_params['mpc_dt'])
-            step_count += 1
-            
+            # Time-compensated sleep for main loop
+            elapsed = time.time() - loop_start_time
+            remaining_time = main_loop_dt - elapsed
+            if remaining_time > 0:
+                time.sleep(remaining_time)
+
     except KeyboardInterrupt:
         print("\nControl interrupted by user")
+        controller.quit = True
+        
+        # Stop all threads
+        print("Stopping VLM...")
+        if controller.vlm:
+            controller.vlm.stop()
+        
+        print("Sending quit signal to tracker...")
+        send_quit_signal()
+        
+        # Join all threads
+        if controller.vlm_thread and controller.vlm_thread.is_alive():
+            controller.vlm_thread.join(timeout=2.0)
+            print("VLM thread joined.")
+            
+        if controller.mpc_thread and controller.mpc_thread.is_alive():
+            controller.mpc_thread.join(timeout=2.0)
+            print("MPC thread joined.")
+            
+        if controller.tracker_thread and controller.tracker_thread.is_alive():
+            controller.tracker_thread.join(timeout=2.0)
+            print("Tracker thread joined.")
+            
     except Exception as e:
         print(f"Error during control: {e}")
         import traceback
         traceback.print_exc()
-    finally:
-        # Cleanup
-        if vlm:
-            print("Stopping VLM...")
-            vlm.stop()
+        controller.quit = True
     
     # Print results
-    if history_mpc_times:
-        avg_mpc_time = np.mean(history_mpc_times)
+    if controller.history_mpc_times:
+        avg_mpc_time = np.mean(controller.history_mpc_times)
         print(f"\nAverage MPC computation time: {avg_mpc_time:.4f}s")
     
     # Plot results
-    if history_x and history_u:
-        mpc.history_x = history_x
-        mpc.history_u = history_u
-        mpc.plot_results(history_x_target=history_x_target)
+    if controller.history_x and controller.history_u:
+        controller.mpc.history_x = controller.history_x
+        controller.mpc.history_u = controller.history_u
+        controller.mpc.plot_results(history_x_target=controller.history_x_target)
         print("Results plotted and saved.")
     
     print("Real robot control complete!")

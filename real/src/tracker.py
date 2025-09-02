@@ -101,6 +101,7 @@ class Tracker:
             self.cur_tip_vel_3d = None
             self.pre_tip_acc_3d = None
             self.cur_tip_acc_3d = None
+            self.last_timestamp = None
 
             # Sampling frequency
             self.dt = config.TRACK_RECORD_DT
@@ -216,12 +217,21 @@ class Tracker:
 
     def get_current_tip(self):
         return self.cur_tip_3d
-    
+
+    def get_current_tip_vel(self):
+        return self.cur_tip_vel_3d
+
     def get_current_base(self):
         return self.cur_base_3d
     
     def get_current_body(self):
         return self.filtered_body_3d
+
+    def get_current_state(self):
+        cur_tip_pos = self.get_current_tip()
+        cur_tip_vel = self.get_current_tip_vel()
+        last_timestamp = self.last_timestamp
+        return np.array([*cur_tip_pos, *cur_tip_vel, last_timestamp])
 
     def get_image_from_csv(self, img_path):
         """
@@ -353,8 +363,8 @@ class Tracker:
         P = np.array(data["projection_matrix"], dtype=np.float64)
         return P
     
-    # For data collection
-    def run_realtime_tracking(self):
+    # For data collection rt and control
+    def run_realtime_tracking(self, control=False):
         """
         Function to track the robot in real-time, buffering data in memory and writing to file at the end.
         """
@@ -372,12 +382,9 @@ class Tracker:
 
         k = 0
         last_timestamp = None
+        if control : self.track = True
         while self.quit is False:
             if self.track:
-                
-                # Wait according to the sampling frequency
-                time.sleep(self.dt/1000)
-
                 # Start the timer
                 start_track = time.time()
 
@@ -475,6 +482,7 @@ class Tracker:
 
                 # Update the last timestamp
                 last_timestamp = timestamp
+                self.last_timestamp = last_timestamp
 
                 # Update counter
                 k += 1
@@ -483,7 +491,14 @@ class Tracker:
                 end_track = time.time()
                 tracking_time = end_track - start_track
                 if debug: print("\rTracking time: {} ms".format(round(tracking_time*1000, 3)))
-                
+
+                # Wait according to the sampling frequency
+                remaining_time = self.dt/1000 - tracking_time
+                if remaining_time > 0:
+                    time.sleep(remaining_time)
+                else:
+                    print(f"Warning: Tracking took {tracking_time*1000:.1f}ms, missed target of {self.dt}ms")
+
             else:
                 # If data buffer is not empty write to file
                 if self.data_buffer != []:
@@ -562,6 +577,7 @@ class Tracker:
         cap_right.release()
         cv2.destroyAllWindows()
 
+    # For data collection
     def run(self):
         """
         main function

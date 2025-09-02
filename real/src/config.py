@@ -118,7 +118,7 @@ N_TRAJECTORIES = 1000
 # Time between two consecutive samples in milliseconds
 # Note: the total duration of the zaber oscilloscope record will be 1024 * SCOPE_RECORD_DT / 1000 seconds 
 SCOPE_RECORD_DT = 2 # Total record time will be 2.048 seconds, so make sure trajectories are shorter than this  
-TRACK_RECORD_DT = 18  # To be added to the time needed for the actual measurement ~2.5 ms
+TRACK_RECORD_DT = 20  # Deprecated: To be added to the time needed for the actual measurement ~2.5 ms
 
 exp_temp_csv = os.path.join(data_dir, "temp", "rt_explorer.csv")
 track_temp_csv = os.path.join(data_dir, "temp", "rt_tracker.csv")

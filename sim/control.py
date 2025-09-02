@@ -249,7 +249,7 @@ def main():
                 # Generate scene image for VLM (unless in text-only mode)
                 scene_image = None
                 start_vlm_time = time.time()
-                scene_image = vlm.ingest_info(
+                scene_image = vlm.ingest_info_sim(
                     sim_data=cc_sim,
                     current_target=x_target[:3] if len(history_x_target) > 0 else None,
                     tip_history=history_tip_position[-50:],  # Last 50 positions for history

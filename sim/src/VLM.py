@@ -103,22 +103,6 @@ class VLM:
         self.zlim = (-1.0, 1.0)
         self.colors = ['red', 'blue', 'orange', 'purple']
         
-#         # System prompt for the VLM
-#         self.system_prompt = """You are a soft robot controller, your goal is to assign the 2D coordinates of the target, where the tip of the robot will be steered after your output. You see the XY plane of the robot's workspace, you can see the robot tip colored in as a black dot, and the current target colored as a green dot. You are able to assign the position of the latter, and the tip possiotn will be controlled to follow the target. Respond with EXACTLY with two numbers separated by a comma.
-# You have to understand the user intention, and output the target position in the XY plane WITHIN the workspace limits. For example the use might want the robot to touch a certain object in the workspace, or to move to a certain position, or to move in a certain direction. 
-# Possible examples:
-# "touch the red circle" → 0.5,0.5 (coordinates of the red circle you deduced from the image)
-# "move right" → 0.5,0.0 (you deduce the tip position is at (0,0) and you set the target to (0.5,0))
-# "avoid the yellow square" → 0.0,-0.5 (you deduce the yellow square is at (0, -0.5), you see the tip is close to it and you set the target away from it (0, 0.5))
-
-# CRITICAL RULES:
-# - NO quotes, NO periods, NO punctuation
-# - NO explanations or descriptions
-# - ONLY the two numbers separated by a comma
-# - The numbers must be within the workspace limits: X in [-1.0, 1.0], Y in [-1.0, 1.0]
-# - The first number is the X coordinate, the second number is the Y coordinate
-# - Do not add anything else
-# """
         # System prompt for the VLM
         with open(os.path.join(os.path.dirname(__file__), "prompt.txt"), "r") as f:
             self.system_prompt = f.read()
@@ -148,7 +132,7 @@ class VLM:
                 return False
         return False
 
-    def ingest_info(self, sim_data, current_target=None, tip_history=None, target_history=None):
+    def ingest_info_sim(self, sim_data, current_target=None, tip_history=None, target_history=None):
         """
         Create visual representation of the current scene for VLM processing.
         
@@ -163,11 +147,7 @@ class VLM:
         """
         try:
             # Get rods data from simulation
-            if hasattr(sim_data, 'get_rods'):
-                rods = sim_data.get_rods()
-            else:
-                rods = sim_data
-                
+            rods = sim_data.get_rods()
             if not rods:
                 return None
                 
@@ -522,32 +502,6 @@ class VLM:
             
             # Handle movement commands
             try:
-                # coords = vlm_response.split(',')
-                # if len(coords) == 2:
-                #     x = float(coords[0].strip())
-                #     y = float(coords[1].strip())
-                    
-                #     # Validate coordinates
-                #     if self.xlim[0] <= x <= self.xlim[1] and self.ylim[0] <= y <= self.ylim[1]:
-                #         target_state = np.array([x, y, -0.5, 0.0, 0.0, 0.0])  # Z and velocities are zero
-                #         print(f"Moving to coordinates: ({x}, {y})")
-                #         if self.web_ui: self.ui.add_status_update(f"Moving to ({x:.2f}, {y:.2f})")
-                        
-                #         # Generate trajectory
-                #         trajectory = self.generate_trajectory(current_state, target_state)
-                #         self.current_target = f"{x},{y}"
-                #         self.current_trajectory = trajectory
-                        
-                #         return trajectory, f"{x},{y}"
-                #     else:
-                #         print(f"Coordinates out of bounds: ({x}, {y}), defaulting to center")
-                #         if self.web_ui: self.ui.add_response("❌ Coordinates out of bounds")
-                #         return None, None
-                # else:
-                #     print(f"Invalid coordinate format: '{vlm_response}', defaulting to center")
-                #     if self.web_ui: self.ui.add_response("❌ Invalid coordinate format")
-                #     return None, None
-                
                 # Check if response is in waypoint format (x1,y1,x2,y2,...,xn,yn)
                 coords = vlm_response.split(',')
                 waypoints = []
