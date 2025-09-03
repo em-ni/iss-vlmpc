@@ -33,8 +33,8 @@ class MPCConfig:
     U_MIN = [-max_torque, -max_torque, -max_torque, -max_torque]
     U_MAX = [max_torque, max_torque, max_torque, max_torque]
     # Workspace box constraints: x, y, z, x_dot, y_dot, z_dot
-    X_MAX = [0.6, 0.6, 0.8, 0.2, 0.2, 0.2]
     X_MIN = [-0.6, -0.6, 0.0, -0.2, -0.2, -0.2]
+    X_MAX = [0.6, 0.6, 0.8, 0.2, 0.2, 0.2]
 
     def stability_check(self):
         """

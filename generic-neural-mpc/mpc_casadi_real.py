@@ -17,19 +17,19 @@ from model.train_robot import StatePredictor, TrainingConfig as TrainConfig
 class MPCConfig:
     # MODEL_PATH = TrainConfig.MODEL_PATH
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    MODEL_PATH = os.path.join(BASE_DIR, "model", "data", "real_rob_f_enhanced_temporal_multi-scale.pth")
+    MODEL_PATH = os.path.join(BASE_DIR, "model", "data", "real_rob_f.pth")
     INPUT_SCALER_PATH = TrainConfig.INPUT_SCALER_PATH
     OUTPUT_SCALER_PATH = TrainConfig.OUTPUT_SCALER_PATH
     REAL_DATASET_PATH = TrainConfig.REAL_DATASET_PATH
-    N = 2
+    N = 3
     DT = 0.020
     SIM_TIME = 10.0
-    q_pos = 10.0 #10.0
+    q_pos = 1000.0 #10.0
     q_vel = 0.0 #0.0
     Q_diag = [q_pos, q_pos, q_pos, q_vel, q_vel, q_vel]
     r_diag = 1.0 #100.0
     R_diag = [r_diag, r_diag, r_diag]  
-    r_rate_diag = 0.0 #150000.0
+    r_rate_diag = 150000.0 #150000.0
     R_rate_diag = [r_rate_diag, r_rate_diag, r_rate_diag] 
     LAMBDA = 50.0 #50
 
@@ -624,7 +624,7 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
     sample = mpc.df[mpc.state_cols].dropna().sample(2, random_state=42)
     x_current = sample.iloc[0].values
     # x_target = sample.iloc[1].values
-    x_target = np.array([2.0, 0.5, -1.0, 0.0, 0.0, 0.0])
+    x_target = np.array([2.0, -1.0, 0.0, 0.0, 0.0, 0.0])
     
     history_x, history_u = [x_current], []
     history_x_target = [x_target]
@@ -670,8 +670,8 @@ def run_mpc_simulation(mode='spr', nn_approximation_order=1):
         
         if i % 10 == 0 or i == 0:
             dist_to_target = np.linalg.norm(x_current[:3] - x_target[:3])
-            print(f"Step {i+1}/{n_steps}, Pos. Distance to target: {dist_to_target:.4f}")
-    
+            print(f"Step {i+1}/{n_steps}, u* = {u_mpc}, Pos. Distance to target: {dist_to_target:.4f}")
+
     end = time.time()
     
     # Print timing stats

@@ -1,3 +1,0 @@
-offset_1: 2.9
-offset_2: 2.6
-offset_3: 2.8

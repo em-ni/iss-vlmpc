@@ -506,8 +506,8 @@ class Tracker:
                 remaining_time = self.dt/1000 - tracking_time
                 if remaining_time > 0:
                     time.sleep(remaining_time)
-                else:
-                    print(f"Warning: Tracking took {tracking_time*1000:.1f}ms, missed target of {self.dt}ms")
+                # else:
+                #     print(f"Warning: Tracking took {tracking_time*1000:.1f}ms, missed target of {self.dt}ms")
 
             else:
                 # If data buffer is not empty write to file

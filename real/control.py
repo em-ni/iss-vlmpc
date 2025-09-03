@@ -5,7 +5,8 @@ import os
 import threading
 import time
 import numpy as np
-from queue import Queue, Empty
+from zaber_motion.ascii import Connection
+from zaber_motion import Units
 
 # Local imports
 import src.config as config
@@ -40,6 +41,11 @@ class ThreadedRobotController:
     def __init__(self):
         # Control flags
         self.quit = False
+
+        # Control variables
+        self.offsets = [0.1, 0.1, 0.1]
+        self.initial_pos = config.initial_pos
+        self.max_pos = self.initial_pos + config.max_stroke
         
         # Thread-safe data sharing
         self.state_lock = threading.Lock()
@@ -68,7 +74,46 @@ class ThreadedRobotController:
         self.history_u = []
         self.history_x_target = []
         self.history_mpc_times = []
-        
+
+        # Connect to devices
+        self.connect_devices()
+
+    def connect_devices(self):
+        """
+        Connect to the Zaber devices and initialize the oscilloscopes.
+        """
+        # Open connection on COM3
+        connection = Connection.open_serial_port('COM3')
+        connection.enable_alerts()
+        device_list = connection.detect_devices()
+        print("Found {} devices.".format(len(device_list)))
+        print(device_list)
+
+        # Get the axis
+        self.axis_1 = device_list[0].get_axis(1)
+        self.axis_2 = device_list[1].get_axis(1)
+        self.axis_3 = device_list[2].get_axis(1)
+
+        # Initialize oscilloscopes
+        self.scope_1 = device_list[0].oscilloscope
+        self.scope_2 = device_list[1].oscilloscope
+        self.scope_3 = device_list[2].oscilloscope
+        print(f'Oscilloscope 1 can store {self.scope_1.get_max_buffer_size()} samples.')
+        print(f'Oscilloscope 2 can store {self.scope_2.get_max_buffer_size()} samples.')
+        print(f'Oscilloscope 3 can store {self.scope_3.get_max_buffer_size()} samples.')
+        return
+    
+    def move(self, control):
+        # Check control limits
+        for i, c in enumerate(control):
+            if c + self.offsets[i] < self.initial_pos or c - self.offsets[i] > self.max_pos:
+                print(f"Control {i} out of limits: {c}")
+                return
+        # print(f"Moving to: {control}", flush=True)
+        self.axis_1.move_absolute(control[0] + self.offsets[0],  Units.LENGTH_MILLIMETRES, False)
+        self.axis_2.move_absolute(control[1] + self.offsets[1],  Units.LENGTH_MILLIMETRES, False)
+        self.axis_3.move_absolute(control[2] + self.offsets[2],  Units.LENGTH_MILLIMETRES, False)
+
     def get_current_state_safe(self):
         """Thread-safe getter for current state"""
         with self.state_lock:
@@ -155,7 +200,7 @@ class ThreadedRobotController:
         target_dt = simulation_params['mpc_dt']  
         
         # Default target
-        x_target = np.array([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        x_target = np.array([2.0, -1.0, 0.0, 0.0, 0.0, 0.0])
         
         while not self.quit:
             cycle_start_time = time.time()
@@ -175,7 +220,11 @@ class ThreadedRobotController:
                 
                 # Compute MPC control
                 start_mpc_time = time.time()
+                # Temp set default target
+                x_target = np.array([2.0, -1.0, 0.0, 0.0, 0.0, 0.0])
                 u_mpc = self.mpc.step(x_target, current_state)
+                dist_to_target = np.linalg.norm(current_state - x_target)
+                print(f"MPC: u* = {u_mpc}, Pos. Distance to target: {dist_to_target:.4f}")
                 end_mpc_time = time.time()
                 
                 mpc_computation_time = end_mpc_time - start_mpc_time
@@ -202,8 +251,8 @@ class ThreadedRobotController:
             remaining_time = target_dt - elapsed
             if remaining_time > 0:
                 time.sleep(remaining_time)
-            else:
-                print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
+            # else:
+            #     print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
 
     def update_state_from_tracker(self):
         """Update shared state from tracker data"""
@@ -221,9 +270,7 @@ class ThreadedRobotController:
         """Send control command to robot at high frequency"""
         control = self.get_control_safe()
         if control is not None:
-            # TODO: Implement actual robot command sending
-            # send_robot_command_implementation(control)
-            pass
+            self.move(control)
 
 def send_quit_signal():
     """Send a quit signal to the tracker via UDP."""
@@ -298,8 +345,8 @@ def main():
             # Update state from tracker
             controller.update_state_from_tracker()
             
-            # # Send robot command at high frequency
-            # controller.send_robot_command()
+            # Send robot command at high frequency
+            controller.send_robot_command()
             
             # Time-compensated sleep for main loop
             elapsed = time.time() - loop_start_time

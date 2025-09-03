@@ -146,7 +146,6 @@ class VLM:
         """
         try:
             pos = current_state[:3]
-            pos[0] = 1.0
             print(f"Generating scene image at position: {pos}")
             
             # Handle waypoints properly
