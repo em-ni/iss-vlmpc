@@ -16,6 +16,64 @@ from google import genai
 from google.genai import types
 from VLMWebUI import VLMWebUI
 
+def calculate_circle_through_points(p1, p2, p3, num_points=100):
+    # Convert input points to numpy arrays
+    p1 = np.array(p1, dtype=float)
+    p2 = np.array(p2, dtype=float)
+    p3 = np.array(p3, dtype=float)
+    
+    # Compute two vectors on the plane and the normal
+    v1 = p2 - p1
+    v2 = p3 - p1
+    normal = np.cross(v1, v2)
+    normal = normal / np.linalg.norm(normal)
+    
+    # Create an orthonormal basis in the plane: u along v1 and v perpendicular to u in the plane
+    u = v1 / np.linalg.norm(v1)
+    v = np.cross(normal, u)
+    
+    # Project points onto 2D coordinates in the (u,v) plane. Let p1 be the origin.
+    a2d = np.array([0, 0])
+    b2d = np.array([np.dot(p2 - p1, u), np.dot(p2 - p1, v)])
+    c2d = np.array([np.dot(p3 - p1, u), np.dot(p3 - p1, v)])
+    
+    # Compute circumcenter in 2D for points a2d, b2d, c2d.
+    d = 2 * (b2d[0] * c2d[1] - b2d[1] * c2d[0])
+    if abs(d) < 1e-6:
+        # Points are collinear, so we cannot define a unique circle.
+        return np.empty((0, 3))
+    center_x = (c2d[1] * (b2d[0]**2 + b2d[1]**2) - b2d[1] * (c2d[0]**2 + c2d[1]**2)) / d
+    center_y = (b2d[0] * (c2d[0]**2 + c2d[1]**2) - c2d[0] * (b2d[0]**2 + b2d[1]**2)) / d
+    center_2d = np.array([center_x, center_y])
+    
+    # Convert the 2D center back to the 3D coordinate system.
+    center_3d = p1 + center_x * u + center_y * v
+    
+    # Compute the radius from the 2D center
+    radius = np.linalg.norm(b2d - center_2d)
+    
+    # Compute the angles for p2 and p3 relative to the center in the 2D plane.
+    angle_p2 = np.arctan2(b2d[1] - center_y, b2d[0] - center_x)
+    angle_p3 = np.arctan2(c2d[1] - center_y, c2d[0] - center_x)
+    
+    # Ensure we take the minimal angular difference.
+    delta = angle_p3 - angle_p2
+    if delta > np.pi:
+        delta -= 2 * np.pi
+    elif delta < -np.pi:
+        delta += 2 * np.pi
+
+    # Create an array of angles spanning from p2 to p3.
+    angles = np.linspace(angle_p2, angle_p2 + delta, num_points)
+    
+    # Calculate the arc points in 3D using the (u, v) basis.
+    arc_points = []
+    for theta in angles:
+        point = center_3d + radius * (np.cos(theta) * u + np.sin(theta) * v)
+        arc_points.append(point)
+    
+    return np.array(arc_points)
+
 """
 For Llama.cpp:
 brew install llama.cpp
@@ -81,14 +139,15 @@ class VLM:
             raise ValueError(f"Unsupported backend: {backend}. Use 'llama' or 'gemini'")
         
         # Predefined targets
-        self.targets = {
-            'right': np.array([0.5, 0.0, -0.5, 0.0, 0.0, 0.0]),
-            'left': np.array([-0.5, 0.0, -0.5, 0.0, 0.0, 0.0]),
-            'up': np.array([0.0, 0.5, -0.5, 0.0, 0.0, 0.0]),
-            'down': np.array([0.0, -0.5, -0.5, 0.0, 0.0, 0.0]),
-            'center': np.array([0.0, 0.0, -0.8, 0.0, 0.0, 0.0])
-        }
-        self.default_target = self.targets['center']  
+        if self.sim:
+            self.targets = {
+                'right': np.array([0.5, 0.0, -0.5, 0.0, 0.0, 0.0]),
+                'left': np.array([-0.5, 0.0, -0.5, 0.0, 0.0, 0.0]),
+                'up': np.array([0.0, 0.5, -0.5, 0.0, 0.0, 0.0]),
+                'down': np.array([0.0, -0.5, -0.5, 0.0, 0.0, 0.0]),
+                'center': np.array([0.0, 0.0, -0.8, 0.0, 0.0, 0.0])
+            }
+            self.default_target = self.targets['center']  
         
         # State variables
         self.current_target = None
@@ -107,6 +166,7 @@ class VLM:
             self.xlim = (0.2, 2.5)
             self.ylim = (-2.0, 1.0)
             self.zlim = (-2.0, 1.0)
+        print(f"Workspace limits set to: X{self.xlim}, Y{self.ylim}, Z{self.zlim}")
         self.colors = ['red', 'blue', 'orange', 'purple']
         
         # System prompt for the VLM
@@ -140,29 +200,27 @@ class VLM:
                 return False
         return False
 
-    def ingest_info_real(self, current_state):
+    def ingest_info_real(self, current_state, robot_base=None, robot_body=None):
         """
         Based on the current state generate the 4 views: XY, XZ, YZ and 3D.
         Combine them in a single plot with 4 subplots
+        
+        Args:
+            current_state: Current state vector containing position
+            robot_base: 3D vector for robot base position
+            robot_body: 3D vector for robot body center position
+            tip_velocity: 3D vector for tip velocity
         """
         try:
             pos = current_state[:3]
+            tip_velocity = current_state[3:6] if len(current_state) >= 6 else None
             print(f"Generating scene image at position: {pos}")
             
             # Handle waypoints properly
             waypoints_3d = []
-            if self.waypoints and len(self.waypoints) >= 2:
-                try:
-                    # Convert waypoints from string list to numpy array
-                    waypoint_coords = [float(wp) for wp in self.waypoints]
-                    # Ensure we have pairs of coordinates
-                    if len(waypoint_coords) % 2 == 0:
-                        waypoints_2d = np.array(waypoint_coords).reshape(-1, 2)
-                        # Add Z coordinate (assume 0.0 as default)
-                        waypoints_3d = np.column_stack([waypoints_2d, np.full(waypoints_2d.shape[0], 0.0)])
-                except (ValueError, IndexError) as e:
-                    print(f"Error processing waypoints: {e}")
-                    waypoints_3d = []
+            if self.waypoints and len(self.waypoints) > 0:
+                # self.waypoints is a list of 3D tuples [(x1, y1, z1), (x2, y2, z2), ...]
+                waypoints_3d = np.array(self.waypoints) 
 
             # Generate the 4 views
             fig, axs = plt.subplots(2, 2, figsize=(12, 12))
@@ -171,8 +229,40 @@ class VLM:
             # XY View (Top)
             axs[0, 0].scatter(pos[0], pos[1], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
+            
+            # Draw robot base as yellow point
+            if robot_base is not None:
+                axs[0, 0].scatter(robot_base[0], robot_base[1], c='yellow', s=80, 
+                                label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
+            
+            # Draw robot body and circle arc
+            if robot_base is not None and robot_body is not None:
+                axs[0, 0].scatter(robot_body[0], robot_body[1], c='blue', s=60, 
+                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
+                
+                # Draw circle arc through base, body, and tip
+                try:
+                    # Ensure all parameters are numpy arrays
+                    robot_body_arr = np.array(robot_body, dtype=float)
+                    pos_arr = np.array(pos, dtype=float)
+                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
+                    
+                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
+                    if circle_points is not None and circle_points.size > 0:
+                        axs[0, 0].plot(circle_points[:, 0], circle_points[:, 1], 'b-', 
+                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
+                except Exception as e:
+                    print(f"Error drawing circle in XY view: {e}")
+            
+            # Draw tip velocity arrow
+            if tip_velocity is not None:
+                vel_scale = 0.1  # Scale factor for velocity arrow
+                axs[0, 0].arrow(pos[0], pos[1], tip_velocity[0] * vel_scale, tip_velocity[1] * vel_scale,
+                              head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
+                              linewidth=2, label='Tip Velocity', zorder=6)
+            
             if len(waypoints_3d) > 0:
-                axs[0, 0].scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], c='blue', s=50, 
+                axs[0, 0].scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], c='green', s=50, 
                                 label='Waypoints', alpha=0.7, zorder=4)
             axs[0, 0].set_title("XY View (Top)", fontsize=12)
             axs[0, 0].set_xlabel("X (m)")
@@ -186,8 +276,40 @@ class VLM:
             # XZ View (Side)
             axs[0, 1].scatter(pos[0], pos[2], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
+            
+            # Draw robot base as yellow point
+            if robot_base is not None:
+                axs[0, 1].scatter(robot_base[0], robot_base[2], c='yellow', s=80, 
+                                label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
+            
+            # Draw robot body and circle arc
+            if robot_base is not None and robot_body is not None:
+                axs[0, 1].scatter(robot_body[0], robot_body[2], c='orange', s=60, 
+                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
+                
+                # Draw circle arc through base, body, and tip
+                try:
+                    # Ensure all parameters are numpy arrays
+                    robot_body_arr = np.array(robot_body, dtype=float)
+                    pos_arr = np.array(pos, dtype=float)
+                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
+                    
+                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
+                    if circle_points is not None and circle_points.size > 0:
+                        axs[0, 1].plot(circle_points[:, 0], circle_points[:, 2], 'b-', 
+                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
+                except Exception as e:
+                    print(f"Error drawing circle in XZ view: {e}")
+            
+            # Draw tip velocity arrow
+            if tip_velocity is not None:
+                vel_scale = 0.1  # Scale factor for velocity arrow
+                axs[0, 1].arrow(pos[0], pos[2], tip_velocity[0] * vel_scale, tip_velocity[2] * vel_scale,
+                              head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
+                              linewidth=2, label='Tip Velocity', zorder=6)
+            
             if len(waypoints_3d) > 0:
-                axs[0, 1].scatter(waypoints_3d[:, 0], waypoints_3d[:, 2], c='blue', s=50, 
+                axs[0, 1].scatter(waypoints_3d[:, 0], waypoints_3d[:, 2], c='green', s=50, 
                                 label='Waypoints', alpha=0.7, zorder=4)
             axs[0, 1].set_title("XZ View (Side)", fontsize=12)
             axs[0, 1].set_xlabel("X (m)")
@@ -201,8 +323,40 @@ class VLM:
             # YZ View (Front)
             axs[1, 0].scatter(pos[1], pos[2], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
+            
+            # Draw robot base as yellow point
+            if robot_base is not None:
+                axs[1, 0].scatter(robot_base[1], robot_base[2], c='yellow', s=80, 
+                                label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
+            
+            # Draw robot body and circle arc
+            if robot_base is not None and robot_body is not None:
+                axs[1, 0].scatter(robot_body[1], robot_body[2], c='orange', s=60, 
+                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
+                
+                # Draw circle arc through base, body, and tip
+                try:
+                    # Ensure all parameters are numpy arrays
+                    robot_body_arr = np.array(robot_body, dtype=float)
+                    pos_arr = np.array(pos, dtype=float)
+                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
+                    
+                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
+                    if circle_points is not None and circle_points.size > 0:
+                        axs[1, 0].plot(circle_points[:, 1], circle_points[:, 2], 'b-', 
+                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
+                except Exception as e:
+                    print(f"Error drawing circle in YZ view: {e}")
+            
+            # Draw tip velocity arrow
+            if tip_velocity is not None:
+                vel_scale = 0.1  # Scale factor for velocity arrow
+                axs[1, 0].arrow(pos[1], pos[2], tip_velocity[1] * vel_scale, tip_velocity[2] * vel_scale,
+                              head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
+                              linewidth=2, label='Tip Velocity', zorder=6)
+            
             if len(waypoints_3d) > 0:
-                axs[1, 0].scatter(waypoints_3d[:, 1], waypoints_3d[:, 2], c='blue', s=50, 
+                axs[1, 0].scatter(waypoints_3d[:, 1], waypoints_3d[:, 2], c='green', s=50, 
                                 label='Waypoints', alpha=0.7, zorder=4)
             axs[1, 0].set_title("YZ View (Front)", fontsize=12)
             axs[1, 0].set_xlabel("Y (m)")
@@ -218,14 +372,55 @@ class VLM:
             ax_3d.scatter(pos[0], pos[1], pos[2], c='red', s=100, label='Current Position', 
                         edgecolors='black', linewidth=2, zorder=5)
             
+            # Draw robot base as yellow point
+            if robot_base is not None:
+                ax_3d.scatter(robot_base[0], robot_base[1], robot_base[2], c='yellow', s=80, 
+                            label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
+            
+            # Draw robot body and circle arc
+            if robot_base is not None and robot_body is not None:
+                ax_3d.scatter(robot_body[0], robot_body[1], robot_body[2], c='orange', s=60, 
+                            label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
+                
+                # Draw circle arc through base, body, and tip
+                try:
+                    # Ensure all parameters are numpy arrays
+                    robot_body_arr = np.array(robot_body, dtype=float)
+                    pos_arr = np.array(pos, dtype=float)
+                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
+                    
+                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
+                    if circle_points is not None and circle_points.size > 0:
+                        ax_3d.plot(circle_points[:, 0], circle_points[:, 1], circle_points[:, 2], 'b-', 
+                                 linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
+                except Exception as e:
+                    print(f"Error drawing circle in 3D view: {e}")
+            
+            # Draw tip velocity arrow
+            if tip_velocity is not None:
+                vel_scale = 0.1  # Scale factor for velocity arrow
+                ax_3d.quiver(pos[0], pos[1], pos[2], 
+                           tip_velocity[0] * vel_scale, tip_velocity[1] * vel_scale, tip_velocity[2] * vel_scale,
+                           color='purple', arrow_length_ratio=0.15, linewidth=2, 
+                           label='Tip Velocity', alpha=0.8)
+            
+            # Add text label for current position
+            ax_3d.text(pos[0], pos[1], pos[2], f'  ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})', 
+                      fontsize=8, color='red', weight='bold')
+            
             if len(waypoints_3d) > 0:
                 ax_3d.scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], waypoints_3d[:, 2], 
-                            c='blue', s=50, label='Waypoints', alpha=0.7, zorder=4)
+                            c='green', s=50, label='Waypoints', alpha=0.7, zorder=4)
+                
+                # Add text labels for waypoints
+                for i, wp in enumerate(waypoints_3d):
+                    ax_3d.text(wp[0], wp[1], wp[2], f'  WP{i+1}: ({wp[0]:.2f}, {wp[1]:.2f}, {wp[2]:.2f})', 
+                              fontsize=8, color='green')
                 
                 # Draw trajectory line if waypoints exist
                 trajectory_points = np.vstack([pos.reshape(1, -1), waypoints_3d])
                 ax_3d.plot(trajectory_points[:, 0], trajectory_points[:, 1], trajectory_points[:, 2], 
-                        'b--', alpha=0.5, linewidth=2, label='Planned Path', zorder=3)
+                        'g--', alpha=0.5, linewidth=2, label='Planned Path', zorder=3)
             
             ax_3d.set_title("3D View", fontsize=12)
             ax_3d.set_xlabel("X (m)")
@@ -530,17 +725,34 @@ class VLM:
         
         Args:
             current_state (np.array): Current 6D state [pos_x, pos_y, pos_z, vel_x, vel_y, vel_z]
-            waypoints (list of float): [x1,y1,x2,y2,...,xn,yn] 
+            waypoints (list of float): For sim=True: [x1,y1,x2,y2,...,xn,yn] 
+                                      For sim=False: [x1,y1,z1,x2,y2,z2,...,xn,yn,zn]
             transition_time (float): Time to reach target in seconds
             
         Returns:
             np.array: Trajectory array of shape (n_steps, 6)
         """
+        
+        # Check if waypoints is empty or invalid
+        coords_per_waypoint = 2 if self.sim else 3
+        if not waypoints or len(waypoints) < coords_per_waypoint:
+            print("No valid waypoints provided")
+            return None
 
         # Create target states from waypoints
         target_states = []
-        for i in range(0, len(waypoints), 2):
-            target_states.append(np.array([waypoints[i], waypoints[i+1], -0.5, 0.0, 0.0, 0.0]))
+        for i in range(0, len(waypoints), coords_per_waypoint):
+            if i + coords_per_waypoint - 1 < len(waypoints):  # Ensure we have all coordinates
+                if self.sim:
+                    # 2D waypoints: use default z=-0.5
+                    target_states.append(np.array([waypoints[i], waypoints[i+1], -0.5, 0.0, 0.0, 0.0]))
+                else:
+                    # 3D waypoints: use provided z coordinate
+                    target_states.append(np.array([waypoints[i], waypoints[i+1], waypoints[i+2], 0.0, 0.0, 0.0]))
+
+        if not target_states:
+            print("No valid target states created from waypoints")
+            return None
 
         # Generate trajectory through each waypoint
         full_trajectory = []
@@ -555,6 +767,10 @@ class VLM:
             full_trajectory.append(trajectory)
             current_state = target_state
 
+        if not full_trajectory:
+            print("No trajectory segments generated")
+            return None
+            
         return np.concatenate(full_trajectory)
 
     def start_input_thread(self):
@@ -612,7 +828,6 @@ class VLM:
                 
             # Add VLM response to UI
             if self.web_ui: self.ui.add_response(f"Target: {vlm_response}")
-            print(f"VLM response: '{vlm_response}'")
             # Handle stop command
             if vlm_response == "stop":
                 print("Stop command received")
@@ -625,33 +840,70 @@ class VLM:
             
             # Handle movement commands
             try:
-                # Check if response is in waypoint format (x1,y1,x2,y2,...,xn,yn)
                 coords = vlm_response.split(',')
-                waypoints = []
-                try:
-                    for coord in coords:
-                        if self.xlim[0] <= float(coord.strip()) <= self.xlim[1] and self.ylim[0] <= float(coord.strip()) <= self.ylim[1]:
-                            waypoints.append(float(coord.strip()))
-                        else:
-                            print(f"Coordinates out of bounds in response: '{vlm_response}', defaulting to center")
-                            if self.web_ui: self.ui.add_response("❌ Coordinates out of bounds")
-                            return None, None
-                except ValueError:
-                    print(f"Invalid coordinate format in response: '{vlm_response}', defaulting to center")
-                    if self.web_ui: self.ui.add_response("❌ Invalid coordinate format")
-                    return None, None
                 
-                # Generate trajectory from waypoints
-                trajectory = self.generate_trajectory_from_waypoints(current_state, waypoints)
+                if self.sim:
+                    # For simulation: 2D coordinates (x1,y1,x2,y2,...,xn,yn)
+                    if len(coords) % 2 != 0:
+                        raise ValueError("Odd number of coordinates for 2D waypoints")
+                    
+                    # Fill waypoint list as flat list for generate_trajectory_from_waypoints
+                    waypoints_flat = []
+                    waypoints_tuples = []  # For validation and storage
+                    
+                    for i in range(0, len(coords), 2):
+                        if i + 1 >= len(coords):
+                            raise ValueError("Missing y coordinate")
+                            
+                        x = float(coords[i].strip())
+                        y = float(coords[i + 1].strip())
+                        
+                        # Validate bounds
+                        if not (self.xlim[0] <= x <= self.xlim[1] and self.ylim[0] <= y <= self.ylim[1]):
+                            raise ValueError(f"Waypoint ({x}, {y}) out of bounds")
+                        
+                        waypoints_flat.extend([x, y])
+                        waypoints_tuples.append((x, y))
+                else:
+                    # For real robot: 3D coordinates (x1,y1,z1,x2,y2,z2,...,xn,yn,zn)
+                    if len(coords) % 3 != 0:
+                        raise ValueError("Number of coordinates must be multiple of 3 for 3D waypoints")
+                    
+                    # Fill waypoint list as flat list for generate_trajectory_from_waypoints
+                    waypoints_flat = []
+                    waypoints_tuples = []  # For validation and storage
+                    
+                    for i in range(0, len(coords), 3):
+                        if i + 2 >= len(coords):
+                            raise ValueError("Missing y or z coordinate")
+                            
+                        x = float(coords[i].strip())
+                        y = float(coords[i + 1].strip())
+                        z = float(coords[i + 2].strip())
+                        
+                        # Validate bounds
+                        if not (self.xlim[0] <= x <= self.xlim[1] and self.ylim[0] <= y <= self.ylim[1] and self.zlim[0] <= z <= self.zlim[1]):
+                            raise ValueError(f"Waypoint ({x}, {y}, {z}) out of bounds")
+                        
+                        waypoints_flat.extend([x, y, z])
+                        waypoints_tuples.append((x, y, z))
+                
+                # Generate trajectory from waypoints (expects flat list)
+                trajectory = self.generate_trajectory_from_waypoints(current_state, waypoints_flat)
 
                 if trajectory is None:
                     print(f"Failed to generate trajectory from waypoints: '{vlm_response}'")
                     if self.web_ui: self.ui.add_response("❌ Failed to generate trajectory")
                     return None, None
 
-                # Store waypoints
-                self.waypoints = vlm_response.split(',')
-                self.current_target = f"{self.waypoints[-2]},{self.waypoints[-1]}"
+                # Store waypoints as tuples for easier access
+                self.waypoints = waypoints_tuples
+                # Get the last waypoint coordinates for current target
+                last_waypoint = self.waypoints[-1]
+                if self.sim:
+                    self.current_target = f"{last_waypoint[0]},{last_waypoint[1]}"
+                else:
+                    self.current_target = f"{last_waypoint[0]},{last_waypoint[1]},{last_waypoint[2]}"
                 self.current_trajectory = trajectory
                 print(f"Generated trajectory with waypoints: {self.waypoints}")
                 

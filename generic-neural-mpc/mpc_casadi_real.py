@@ -38,8 +38,8 @@ class MPCConfig:
     U_MIN = [min_volume, min_volume, min_volume]
     U_MAX = [max_volume, max_volume, max_volume]
     # Workspace box constraints: x, y, z, x_dot, y_dot, z_dot
-    X_MIN = [0.36, -1.8, -1.6, -20.0, -20.0, -20.0]
-    X_MAX = [2.4, 0.7, 0.8, 20.0, 20.0, 20.0]
+    X_MIN = [-0.1, -1.4, -1.4, -20.0, -20.0, -20.0]
+    X_MAX = [2.2, 1.4, 1.8, 20.0, 20.0, 20.0]
 
     def stability_check(self):
         """

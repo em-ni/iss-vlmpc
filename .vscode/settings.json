@@ -2,6 +2,7 @@
     "python.analysis.extraPaths": [
         "./generic-neural-mpc/model",
         "./generic-neural-mpc",
-        "./sim/src"
+        "./sim/src",
+        "./real"
     ]
 }

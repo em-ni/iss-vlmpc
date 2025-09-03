@@ -420,7 +420,7 @@ class Tracker:
 
                 # Triangulate the points
                 if debug: start_triangulate = time.time()
-                tip_3d, base_3d, _ = self.triangulate(frame_left, frame_right, with_body=False)
+                tip_3d, base_3d, body_3d = self.triangulate(frame_left, frame_right, with_body=True)
                 if tip_3d is None or base_3d is None:
                     print("\nBad triangulation. Skipping this iteration.")
                     continue
@@ -433,6 +433,9 @@ class Tracker:
                 if debug: start_buffer = time.time()
                 self.cur_tip_3d = tip_3d - base_3d # NOTE: tip position is relative to the base position
                 self.cur_base_3d = base_3d
+                if body_3d is not None:
+                    # Apply filtering to body coordinates
+                    self.cur_body_3d = self.filter_body_coordinates(body_3d - base_3d)
 
                 # If there are at least two previous positions calculate velocity
                 if self.pre_tip_3d is not None and self.pre_base_3d is not None:
