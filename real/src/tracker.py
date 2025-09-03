@@ -116,7 +116,7 @@ class Tracker:
             # Initialize threads
             self.init_rt_threads()
 
-        print(f"\nTracker initialized")
+        print(f"Tracker initialized")
 
     # These three could be a single function...
     def detect_tip(self, frame):

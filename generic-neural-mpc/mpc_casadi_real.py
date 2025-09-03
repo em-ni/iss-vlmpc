@@ -125,7 +125,7 @@ class MPCController:
             self.df.columns = self.df.columns.str.strip()
             
             self.model = StatePredictor(input_dim=9, output_dim=6)
-            self.model.load_state_dict(torch.load(MPCConfig.MODEL_PATH))
+            self.model.load_state_dict(torch.load(MPCConfig.MODEL_PATH, weights_only=True))
             self.model.eval()  # Set to evaluation mode
             
             # try:

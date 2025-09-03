@@ -196,7 +196,6 @@ class ThreadedRobotController:
         """Dedicated thread for MPC processing
         MPC computation takes ~70ms
         """
-        print("MPC worker thread started")
         target_dt = simulation_params['mpc_dt']  
         
         # Default target
@@ -251,8 +250,8 @@ class ThreadedRobotController:
             remaining_time = target_dt - elapsed
             if remaining_time > 0:
                 time.sleep(remaining_time)
-            # else:
-            #     print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
+            else:
+                print(f"Warning: MPC Processing took {elapsed:.3f}s, missed target of {target_dt}s")
 
     def update_state_from_tracker(self):
         """Update shared state from tracker data"""
@@ -290,7 +289,6 @@ def main():
     
     try:
         # Initialize Tracker
-        print("Initializing Tracker...")
         experiment_name = config.experiment_name
         save_dir = config.save_dir
         csv_path = config.csv_path
@@ -304,7 +302,7 @@ def main():
         
         # Initialize VLM if needed
         if CONTROL_MODE == "vlm":
-            print("Initializing VLM...")
+            print("\nInitializing VLM...")
             controller.vlm = VLM(
                 sim=False,
                 vlm_dt=simulation_params['vlm_dt'],
@@ -327,7 +325,7 @@ def main():
                 print("VLM worker thread started.")
 
         # Initialize MPC controller
-        print("Initializing MPC Controller...")
+        print("\nInitializing MPC Controller...")
         controller.mpc = MPCController(nn_approximation_order=APPROXIMATION_ORDER)
 
         # Start MPC worker thread
@@ -336,7 +334,7 @@ def main():
         print("MPC worker thread started.")
         
         # Main loop for high-frequency operations
-        print("Starting main control loop...")
+        print("\nStarting main control loop...")
         main_loop_dt = 0.01  # 100Hz for robot command sending
         
         while True:

@@ -38,6 +38,7 @@ class VLM:
             backend (str): "llama" for llama.cpp server or "gemini" for Google Gemini
             model_name (str): Model name (for Gemini: "gemini-2.5-pro" or "gemini-2.5-flash")
         """
+        self.sim = sim
         self.server_url = server_url
         self.vlm_dt = vlm_dt
         self.mpc_dt = mpc_dt
@@ -98,7 +99,7 @@ class VLM:
         self.waypoints = []  # Store waypoints from VLM
 
         # Visualization parameters for scene reconstruction
-        if sim:
+        if self.sim:
             self.xlim = (-1.0, 1.0)
             self.ylim = (-1.0, 1.0)
             self.zlim = (-1.0, 1.0)
