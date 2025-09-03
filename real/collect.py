@@ -13,11 +13,11 @@ def main(realtime: bool):
     save_dir = config.save_dir
     csv_path = config.csv_path
 
-    # # Load pressure 
-    # offsets = []
-    # pressure_loader = PressureLoader(save_offsets=True)
-    # offsets = pressure_loader.load_pressure()
-    offsets = [0.0, 0.0, 0.0]  # Placeholder for offsets, replace with actual values if needed
+    # Load pressure 
+    offsets = []
+    pressure_loader = PressureLoader(save_offsets=True)
+    offsets = pressure_loader.load_pressure()
+    # offsets = [0.0, 0.0, 0.0]  # Placeholder for offsets, replace with actual values if needed
 
     # Initialize the classes
     explorer = Explorer(save_dir, csv_path, offsets, realtime)

@@ -15,8 +15,8 @@ if new_experiment:
     print(
         "\n\nIMPORTANT: Check if the camera indexes are correct every time you run the code.\n\n"
     )
-cam_left_index = 3 #0
-cam_right_index = 6 #2
+cam_left_index = 0
+cam_right_index = 2
 P_left_yaml = os.path.abspath(
     os.path.join(
         "calibration", "calibration_images_camleft_640x480p", "projection_matrix.yaml"
@@ -90,7 +90,7 @@ home_first = False
 init_pressure = 0.5
 initial_pos = 115
 window_steps = 20  # Windows length in steps
-max_stroke = 5  # distance in mm from the initial position to final position
+max_stroke = 4  # distance in mm from the initial position to final position
 steps = 40  # Suggestion: use utils/workspace_preview.py
 
 elongationstepSize = (

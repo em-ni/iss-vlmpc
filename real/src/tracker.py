@@ -16,8 +16,10 @@ class CameraStream:
     def __init__(self, cam_index):
         system = platform.system()
         if system == "Windows":
+            print("Using Windows camera backend")
             self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         else:
+            print("Using default camera backend")
             self.cap = cv2.VideoCapture(cam_index)
         self.ret = False
         self.frame = None
