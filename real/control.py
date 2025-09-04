@@ -11,6 +11,7 @@ from zaber_motion import Units
 
 # Local imports
 import src.config as config
+from src.pressure_loader import PressureLoader
 from src.tracker import Tracker
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(os.path.dirname(current_dir))
@@ -39,10 +40,14 @@ class ThreadedRobotController:
         self.quit_lock = threading.Lock()
 
         # Control variables
-        self.offsets = [0.1, 0.1, 0.1]
+        self.offsets = simulation_params.get('pressure_offsets', [0.0, 0.0, 0.0])
         self.initial_pos = config.initial_pos
         self.max_pos = self.initial_pos + config.max_stroke
         self.default_target = np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0])  # Default target if VLM fails
+        
+        # Control filter parameters
+        self.filter_alpha = 0.8  # Low-pass filter coefficient (0 < alpha < 1, higher = less filtering)
+        self.filtered_control = [self.initial_pos, self.initial_pos, self.initial_pos]  # Initialize with initial position
         
         # Thread-safe data sharing
         self.state_lock = threading.Lock()
@@ -75,12 +80,11 @@ class ThreadedRobotController:
 
         # Connect to devices
         self.connect_devices()
-        input("Press Enter to move to initial position...")
-        self.move_to_init()
-        print("Moved to initial position.")
-        input(f"Press Enter to add offsets = {self.offsets}")
-        self.add_offsets()
-
+        # input("Press Enter to move to initial position...")
+        # self.move_to_init()
+        # print("Moved to initial position.")
+        # input(f"Press Enter to load pressure")
+        # self.add_offsets()
 
     def connect_devices(self):
         """
@@ -108,15 +112,22 @@ class ThreadedRobotController:
         return
     
     def move(self, control):
-        # Check control limits
-        for i, c in enumerate(control):
-            if c + self.offsets[i] < self.initial_pos or c - self.offsets[i] > self.max_pos:
-                print(f"Control {i} out of limits: {c}")
+        # Apply low-pass filter to smooth control signals
+        for i in range(len(control)):
+            self.filtered_control[i] = self.filter_alpha * control[i] + (1 - self.filter_alpha) * self.filtered_control[i]
+        
+        # Check control limits using filtered control
+        epsilon = 1e-3
+        for i, c in enumerate(self.filtered_control):
+            if c + self.offsets[i] < self.initial_pos + self.offsets[i] - epsilon or c + self.offsets[i] > self.max_pos + self.offsets[i] + epsilon:
+                print(f"Filtered control {i} out of limits: {c}, moving to initial position instead.")
+                self.move([self.initial_pos + self.offsets[0], self.initial_pos + self.offsets[1], self.initial_pos + self.offsets[2]])
                 return
-        # print(f"Moving to: {control}", flush=True)
-        self.axis_1.move_absolute(control[0] + self.offsets[0],  Units.LENGTH_MILLIMETRES, False)
-        self.axis_2.move_absolute(control[1] + self.offsets[1],  Units.LENGTH_MILLIMETRES, False)
-        self.axis_3.move_absolute(control[2] + self.offsets[2],  Units.LENGTH_MILLIMETRES, False)
+        # print(f"Moving to: {self.filtered_control}", flush=True)
+        self.axis_1.move_absolute(self.filtered_control[0] + self.offsets[0],  Units.LENGTH_MILLIMETRES, False)
+        self.axis_2.move_absolute(self.filtered_control[1] + self.offsets[1],  Units.LENGTH_MILLIMETRES, False)
+        self.axis_3.move_absolute(self.filtered_control[2] + self.offsets[2],  Units.LENGTH_MILLIMETRES, False)
+        return
 
     def move_to_init(self):
         """Move to the initial position"""
@@ -169,15 +180,19 @@ class ThreadedRobotController:
             self.vlm_trajectory_index = 0
             self.vlm_target_name = target_name
             
-    def get_vlm_target_safe(self):
+    def get_vlm_target_safe(self, mode):
         """Thread-safe getter for current VLM target"""
         with self.trajectory_lock:
-            if self.vlm_trajectory is not None:
-                if self.vlm_trajectory_index < len(self.vlm_trajectory):
-                    target = self.vlm_trajectory[self.vlm_trajectory_index].copy()
-                    self.vlm_trajectory_index += 1
-                    return target
-                else:
+            if mode == 'trajectory_tracking':
+                if self.vlm_trajectory is not None:
+                    if self.vlm_trajectory_index < len(self.vlm_trajectory):
+                        target = self.vlm_trajectory[self.vlm_trajectory_index].copy()
+                        self.vlm_trajectory_index += 1
+                        return target
+                    else:
+                        return self.vlm_trajectory[-1].copy()
+            if mode == 'set_point_regulation':
+                if self.vlm_trajectory is not None:
                     return self.vlm_trajectory[-1].copy()
             return None
     
@@ -263,17 +278,23 @@ class ThreadedRobotController:
                     continue
                 
                 # Update target from VLM if available
-                vlm_target = self.get_vlm_target_safe()
+                vlm_target = self.get_vlm_target_safe(mode='set_point_regulation')
                 # print(f"VLM target: {vlm_target}")
                 if vlm_target is not None:
                     x_target = vlm_target
+                    # Add a small delta to the x of the target to stay below it
+                    x_target[0] += 0.2  # Small delta
                 
                 # Compute MPC control
                 start_mpc_time = time.time()
-                # x_target = self.default_target.copy()
+                x_target = self.default_target.copy()
+                x_target = np.array([1.16575358, -0.95273664,  0.33866089, 0.0, 0.0, 0.0]) # brown target
+                # x_target = np.array([1.19999521, 0.88552074, 0.38695709, 0.0, 0.0, 0.0]) # green target
+                # x_target = np.array([0.13007123, -0.18891038, -1.35748895, 0.0, 0.0, 0.0]) # lightblue target
+                x_target[0] += 0.2  # Small delta
                 u_mpc = self.mpc.step(x_target, current_state)
                 dist_to_target = np.linalg.norm(current_state - x_target)
-                if self.started: print(f"MPC: u* = {u_mpc}, Pos. Distance to target: {dist_to_target:.4f}")
+                if self.started: print(f"MPC: u* = {u_mpc}, Pos. Distance to target: {dist_to_target:.4f}", end='\r', flush=True)
                 end_mpc_time = time.time()
                 
                 mpc_computation_time = end_mpc_time - start_mpc_time
@@ -373,10 +394,18 @@ def main():
         'vlm_dt': 10.0,      # 1Hz
         'control_mode': CONTROL_MODE,
         'approximation_order': APPROXIMATION_ORDER,
-        'final_time': FINAL_TIME
+        'final_time': FINAL_TIME,
+        'offsets': [0.0, 0.0, 0.0]
     }
 
-    print("Initializing Real Robot MPC Control...")
+    # Load pressure 
+    offsets = []
+    pressure_loader = PressureLoader(save_offsets=False)
+    offsets = pressure_loader.load_pressure()
+    simulation_params['offsets'] = offsets
+    print(f"Loaded pressure offsets: {offsets}\n")
+
+    print("Initializing Real Robot PSS-VLMPC...")
     
     # Create controller instance
     controller = ThreadedRobotController(simulation_params)
@@ -398,6 +427,16 @@ def main():
     tip_scatter = ax.scatter([2.0], [0], [0], s=250, c="red", label="Current Tip")
     # Draw a line between base and tip
     body_arc = ax.plot([0, 2.0], [0, 0], [0, 0], c="blue", label="Body Arc", linewidth=5)
+
+    # Draw targets
+    targets = {
+        'brown': np.array([1.16575358, -0.95273664,  0.33866089]),
+        'green': np.array([1.19999521, 0.88552074, 0.38695709]),
+        'lightblue': np.array([0.13007123, -0.18891038, -1.35748895]),
+    }
+
+    for target_name, target_pos in targets.items():
+        ax.scatter(target_pos[0], target_pos[1], target_pos[2], c=target_name, s=80, label=f'{target_name} target')
 
     # Add legend
     ax.legend()
@@ -535,7 +574,7 @@ def main():
                     tip_point = np.array([tip_x[0], tip_y[0], tip_z[0]])
                     
                     # Calculate circle through the three points
-                    calculated_points = calculate_circle_through_points(body_point, tip_point, [0.0, 0.0, 0.0], num_points=50)
+                    calculated_points = calculate_circle_through_points(body_point, tip_point, base_point, num_points=50)
 
                     if calculated_points is not None:
                         circle_points = calculated_points
@@ -545,13 +584,8 @@ def main():
                     # If circle calculation fails, use default line interpolation
                     if frame % 100 == 0:
                         print(f"Circle calculation failed: {e}")
-                    # Create simple interpolation between base, body, and tip
-                    if body_x and tip_x:
-                        # Linear interpolation from base to body to tip
-                        base_to_body = np.linspace([0, 0, 0], [body_x[0], body_y[0], body_z[0]], 5)
-                        body_to_tip = np.linspace([body_x[0], body_y[0], body_z[0]], [tip_x[0], tip_y[0], tip_z[0]], 5)
-                        circle_points = np.vstack([base_to_body[1:], body_to_tip[:-1]])[:9]  # Take 9 points total
-                        body_arc = ax.plot(circle_points[:, 0], circle_points[:, 1], circle_points[:, 2], c="blue", label="Body Arc", linewidth=5)
+                    # Draw a straight line from base 0,0,0 to tip
+                    ax.plot([0, tip_x[0]], [0, tip_y[0]], [0, tip_z[0]], c="blue", label="Body Arc", linewidth=5)
 
             # Garbage collection every 50 frames
             if frame % 50 == 0:

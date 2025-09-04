@@ -24,7 +24,7 @@ class MPCConfig:
     N = 3
     DT = 0.020
     SIM_TIME = 10.0
-    q_pos = 1000.0 #10.0
+    q_pos = 4000.0 #10.0
     q_vel = 0.0 #0.0
     Q_diag = [q_pos, q_pos, q_pos, q_vel, q_vel, q_vel]
     r_diag = 1.0 #100.0

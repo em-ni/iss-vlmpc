@@ -4,28 +4,23 @@ import yaml
 import os
 import pyvista as pv
 
-# ---------------------------
-# 1. Load the two images
-# ---------------------------
+# Load the two images
 img1_path = os.path.join("data", "test", "cam_left.png")
 img2_path = os.path.join("data", "test", "cam_right.png")
-
 img1 = cv2.imread(img1_path)
 img2 = cv2.imread(img2_path)
-
 if img1 is None or img2 is None:
     print("Error: Could not load one or both images.")
     exit()
 
-# ---------------------------
-# 2. Detect Colors in the Images
-# ---------------------------
-# Define HSV ranges for red, green, blue, and yellow.
-# Note: Red usually spans two ranges in HSV.
+# Detect Colors in the Images
 color_ranges = {
     "red": [((0, 80, 0), (5, 255, 255)), ((172, 80, 0), (180, 255, 255))],
     "blue": [((100, 150, 0), (140, 255, 255))],
     "yellow": [((23, 88, 0), (36, 254, 255))],
+    "green": [((88, 140, 0), (94, 255, 255))],
+    "brown": [((169, 47, 0), (179, 115, 92)), ((0, 47, 0), (9, 115, 92))],
+    "lightblue": [((94, 54, 119), (104, 255, 255))],
 }
 
 
@@ -65,7 +60,6 @@ hsv2 = cv2.cvtColor(img2, cv2.COLOR_BGR2HSV)
 # For each color, detect the centroid in both images.
 points_cam1 = {}
 points_cam2 = {}
-
 for color, ranges in color_ranges.items():
     pt1 = detect_color_center(hsv1, ranges)
     pt2 = detect_color_center(hsv2, ranges)
@@ -75,7 +69,7 @@ for color, ranges in color_ranges.items():
         points_cam1[color] = pt1
         points_cam2[color] = pt2
 
-# Optionally, draw the detected points on the images.
+# Draw the detected points on the images.
 for color, pt in points_cam1.items():
     cv2.circle(img1, pt, 5, (0, 0, 255), -1)
     cv2.putText(
@@ -100,9 +94,7 @@ for color, pt in points_cam2.items():
     )
 
 
-# ---------------------------
-# 3. Load Projection Matrices from YAML Files
-# ---------------------------
+# Load Projection Matrices from YAML Files
 def load_projection_matrix(yaml_path):
     with open(yaml_path, "r") as f:
         data = yaml.safe_load(f)
@@ -113,16 +105,12 @@ def load_projection_matrix(yaml_path):
 # File paths for the projection matrices.
 P_right_yaml = os.path.join("calibration", "calibration_images_camright_640x480p", "projection_matrix.yaml")
 P_left_yaml = os.path.join("calibration", "calibration_images_camleft_640x480p", "projection_matrix.yaml")
-
 P_right_matrix = load_projection_matrix(P_right_yaml)
 P_left_matrix = load_projection_matrix(P_left_yaml)
-
 print("Projection Matrix for right camera:\n", P_right_matrix)
 print("Projection Matrix for left camera:\n", P_left_matrix)
 
-# ---------------------------
-# 4. Triangulate the Detected Points
-# ---------------------------
+# Triangulate the Detected Points
 triangulated_points = {}
 for color in points_cam1:
     if color in points_cam2:
@@ -137,15 +125,22 @@ for color in points_cam1:
         # Convert from homogeneous coordinates to 3D.
         point_3d = point_4d / point_4d[3]
         triangulated_points[color] = point_3d[:3].ravel()
-        print(f"{color} point 3D coordinate: {triangulated_points[color]}")
+        print(f"{color} point 3D absolute coordinate: {triangulated_points[color]}")
     else:
         print(
             f"Warning: {color} was not detected in both images; skipping triangulation."
         )
 
-# ---------------------------
-# 5. Display the Results (Optional)
-# ---------------------------
+# Find coordinate of the yellow
+yellow_coord = triangulated_points.get("yellow").copy()
+
+# Subtract the yellow coordinates to each point
+print("\n3D coordinates relative to the yellow base:")
+for color, coord in triangulated_points.items():
+    coord -= yellow_coord
+    print(f"{color} point 3D relative coordinate: {coord}")
+
+# Display the Results (Optional)
 # cv2.imshow("Camera 1", img1)
 # cv2.imshow("Camera 2", img2)
 # cv2.waitKey(0)
@@ -157,7 +152,7 @@ plotter = pv.Plotter()
 # For each triangulated point, add a small sphere and a label.
 for color_name, point in triangulated_points.items():
     # Create a sphere centered at the triangulated point.
-    sphere = pv.Sphere(radius=0.01, center=point)
+    sphere = pv.Sphere(radius=0.1, center=point)
     # Add the sphere to the scene using the color name (e.g., "red", "green", etc.)
     plotter.add_mesh(sphere, color=color_name, specular=0.5)
     # Add a label near the point
@@ -165,7 +160,7 @@ for color_name, point in triangulated_points.items():
         [point], [color_name], font_size=12, point_color="black", shape_opacity=0.5
     )
 
-# Optional: Add coordinate axes and a bounding grid to provide spatial context.
+# Add coordinate axes and a bounding grid to provide spatial context.
 plotter.add_axes(line_width=2)
 plotter.show_bounds(grid="back", color="gray")
 

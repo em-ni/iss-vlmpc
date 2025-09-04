@@ -33,5 +33,5 @@ def take_photo(cam_index):
 
 
 if __name__ == "__main__":
-    cam_index = 2
+    cam_index = 0
     take_photo(cam_index)

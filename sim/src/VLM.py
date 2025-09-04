@@ -1,4 +1,5 @@
 # src/VLM.py
+import traceback
 import requests
 import threading
 import numpy as np
@@ -148,6 +149,13 @@ class VLM:
                 'center': np.array([0.0, 0.0, -0.8, 0.0, 0.0, 0.0])
             }
             self.default_target = self.targets['center']  
+        else:
+            self.targets = {
+                'brown': np.array([1.16575358, -0.95273664,  0.33866089]),
+                'green': np.array([1.19999521, 0.88552074, 0.38695709]),
+                'lightblue': np.array([0.13007123, -0.18891038, -1.35748895]),
+            }
+            self.default_target = np.array([1.84576097, -0.03407848, 0.00222449])
         
         # State variables
         self.current_target = None
@@ -213,20 +221,32 @@ class VLM:
         """
         try:
             pos = current_state[:3]
-            tip_velocity = current_state[3:6] if len(current_state) >= 6 else None
             print(f"Generating scene image at position: {pos}")
-            
+            tip_velocity = current_state[3:6] if len(current_state) >= 6 else None
+            # Process base position
+            if robot_base is not None:
+                robot_base = robot_base.ravel()
+                base_x, base_y, base_z = [robot_base[0]], [robot_base[1]], [robot_base[2]]
+
+            # Process body position
+            if robot_body is not None:
+                robot_body = robot_body.ravel()
+                body_x, body_y, body_z = [robot_body[0]], [robot_body[1]], [robot_body[2]]
+
+            base_point = np.array([0, 0, 0])
+            body_point = np.array([body_x[0], body_y[0], body_z[0]])
+
             # Handle waypoints properly
             waypoints_3d = []
             if self.waypoints and len(self.waypoints) > 0:
                 # self.waypoints is a list of 3D tuples [(x1, y1, z1), (x2, y2, z2), ...]
                 waypoints_3d = np.array(self.waypoints) 
-
+            
             # Generate the 4 views
             fig, axs = plt.subplots(2, 2, figsize=(12, 12))
             fig.suptitle("Current State Views", fontsize=16)
 
-            # XY View (Top)
+            # XY View
             axs[0, 0].scatter(pos[0], pos[1], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
             
@@ -235,31 +255,17 @@ class VLM:
                 axs[0, 0].scatter(robot_base[0], robot_base[1], c='yellow', s=80, 
                                 label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
             
-            # Draw robot body and circle arc
-            if robot_base is not None and robot_body is not None:
-                axs[0, 0].scatter(robot_body[0], robot_body[1], c='blue', s=60, 
-                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
-                
-                # Draw circle arc through base, body, and tip
-                try:
-                    # Ensure all parameters are numpy arrays
-                    robot_body_arr = np.array(robot_body, dtype=float)
-                    pos_arr = np.array(pos, dtype=float)
-                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
-                    
-                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
-                    if circle_points is not None and circle_points.size > 0:
-                        axs[0, 0].plot(circle_points[:, 0], circle_points[:, 1], 'b-', 
-                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
-                except Exception as e:
-                    print(f"Error drawing circle in XY view: {e}")
-            
             # Draw tip velocity arrow
             if tip_velocity is not None:
                 vel_scale = 0.1  # Scale factor for velocity arrow
                 axs[0, 0].arrow(pos[0], pos[1], tip_velocity[0] * vel_scale, tip_velocity[1] * vel_scale,
                               head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
                               linewidth=2, label='Tip Velocity', zorder=6)
+            
+            # Draw targets
+            for target_name, target_pos in self.targets.items():
+                axs[0, 0].scatter(target_pos[0], target_pos[1], c=target_name, s=80, 
+                                label=f'{target_name} target', edgecolors='black', linewidth=1, zorder=4)
             
             if len(waypoints_3d) > 0:
                 axs[0, 0].scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], c='green', s=50, 
@@ -270,10 +276,10 @@ class VLM:
             axs[0, 0].set_xlim(self.xlim)
             axs[0, 0].set_ylim(self.ylim)
             axs[0, 0].grid(True, alpha=0.3)
-            axs[0, 0].legend()
+            axs[0, 0].legend(loc='lower right', fontsize=8)
             axs[0, 0].set_aspect('equal')
 
-            # XZ View (Side)
+            # XZ View
             axs[0, 1].scatter(pos[0], pos[2], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
             
@@ -282,31 +288,17 @@ class VLM:
                 axs[0, 1].scatter(robot_base[0], robot_base[2], c='yellow', s=80, 
                                 label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
             
-            # Draw robot body and circle arc
-            if robot_base is not None and robot_body is not None:
-                axs[0, 1].scatter(robot_body[0], robot_body[2], c='orange', s=60, 
-                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
-                
-                # Draw circle arc through base, body, and tip
-                try:
-                    # Ensure all parameters are numpy arrays
-                    robot_body_arr = np.array(robot_body, dtype=float)
-                    pos_arr = np.array(pos, dtype=float)
-                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
-                    
-                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
-                    if circle_points is not None and circle_points.size > 0:
-                        axs[0, 1].plot(circle_points[:, 0], circle_points[:, 2], 'b-', 
-                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
-                except Exception as e:
-                    print(f"Error drawing circle in XZ view: {e}")
-            
             # Draw tip velocity arrow
             if tip_velocity is not None:
                 vel_scale = 0.1  # Scale factor for velocity arrow
                 axs[0, 1].arrow(pos[0], pos[2], tip_velocity[0] * vel_scale, tip_velocity[2] * vel_scale,
                               head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
                               linewidth=2, label='Tip Velocity', zorder=6)
+            
+            # Draw targets
+            for target_name, target_pos in self.targets.items():
+                axs[0, 1].scatter(target_pos[0], target_pos[2], c=target_name, s=80, 
+                                label=f'{target_name} target', edgecolors='black', linewidth=1, zorder=4)
             
             if len(waypoints_3d) > 0:
                 axs[0, 1].scatter(waypoints_3d[:, 0], waypoints_3d[:, 2], c='green', s=50, 
@@ -317,10 +309,10 @@ class VLM:
             axs[0, 1].set_xlim(self.xlim)
             axs[0, 1].set_ylim(self.zlim)
             axs[0, 1].grid(True, alpha=0.3)
-            axs[0, 1].legend()
+            axs[0, 1].legend(loc='lower left', fontsize=8)
             axs[0, 1].set_aspect('equal')
 
-            # YZ View (Front)
+            # YZ View
             axs[1, 0].scatter(pos[1], pos[2], c='red', s=100, label='Current Position', 
                             edgecolors='black', linewidth=2, zorder=5)
             
@@ -329,31 +321,17 @@ class VLM:
                 axs[1, 0].scatter(robot_base[1], robot_base[2], c='yellow', s=80, 
                                 label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
             
-            # Draw robot body and circle arc
-            if robot_base is not None and robot_body is not None:
-                axs[1, 0].scatter(robot_body[1], robot_body[2], c='orange', s=60, 
-                                label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
-                
-                # Draw circle arc through base, body, and tip
-                try:
-                    # Ensure all parameters are numpy arrays
-                    robot_body_arr = np.array(robot_body, dtype=float)
-                    pos_arr = np.array(pos, dtype=float)
-                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
-                    
-                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
-                    if circle_points is not None and circle_points.size > 0:
-                        axs[1, 0].plot(circle_points[:, 1], circle_points[:, 2], 'b-', 
-                                     linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
-                except Exception as e:
-                    print(f"Error drawing circle in YZ view: {e}")
-            
             # Draw tip velocity arrow
             if tip_velocity is not None:
                 vel_scale = 0.1  # Scale factor for velocity arrow
                 axs[1, 0].arrow(pos[1], pos[2], tip_velocity[1] * vel_scale, tip_velocity[2] * vel_scale,
                               head_width=0.05, head_length=0.03, fc='purple', ec='purple', 
                               linewidth=2, label='Tip Velocity', zorder=6)
+            
+            # Draw targets
+            for target_name, target_pos in self.targets.items():
+                axs[1, 0].scatter(target_pos[1], target_pos[2], c=target_name, s=80, 
+                                label=f'{target_name} target', edgecolors='black', linewidth=1, zorder=4)
             
             if len(waypoints_3d) > 0:
                 axs[1, 0].scatter(waypoints_3d[:, 1], waypoints_3d[:, 2], c='green', s=50, 
@@ -364,7 +342,7 @@ class VLM:
             axs[1, 0].set_xlim(self.ylim)
             axs[1, 0].set_ylim(self.zlim)
             axs[1, 0].grid(True, alpha=0.3)
-            axs[1, 0].legend()
+            axs[1, 0].legend(loc='lower left', bbox_to_anchor=(0, 0), fontsize=8)
             axs[1, 0].set_aspect('equal')
 
             # 3D View
@@ -378,24 +356,19 @@ class VLM:
                             label='Robot Base', edgecolors='black', linewidth=1, zorder=4)
             
             # Draw robot body and circle arc
-            if robot_base is not None and robot_body is not None:
-                ax_3d.scatter(robot_body[0], robot_body[1], robot_body[2], c='orange', s=60, 
-                            label='Robot Body', edgecolors='black', linewidth=1, zorder=4)
-                
+            if robot_base is not None and robot_body is not None:                
                 # Draw circle arc through base, body, and tip
+                pos_arr = np.array(pos)
                 try:
-                    # Ensure all parameters are numpy arrays
-                    robot_body_arr = np.array(robot_body, dtype=float)
-                    pos_arr = np.array(pos, dtype=float)
-                    base_arr = np.array([0.0, 0.0, 0.0], dtype=float)
-                    
-                    circle_points = calculate_circle_through_points(robot_body_arr, pos_arr, base_arr, num_points=50)
-                    if circle_points is not None and circle_points.size > 0:
-                        ax_3d.plot(circle_points[:, 0], circle_points[:, 1], circle_points[:, 2], 'b-', 
-                                 linewidth=3, alpha=0.7, label='Robot Arc', zorder=3)
+                    circle_points = calculate_circle_through_points(body_point, pos_arr, base_point, num_points=50)
+                    if circle_points is not None:
+                        ax_3d.plot(circle_points[:, 0], circle_points[:, 1], circle_points[:, 2], c="blue", label="Body Arc", linewidth=5)
                 except Exception as e:
                     print(f"Error drawing circle in 3D view: {e}")
-            
+                    traceback.print_exc()
+                    # Draw a straight line from base 0,0,0 to tip
+                    ax_3d.plot([0, pos[0]], [0, pos[1]], [0, pos[2]], c="blue", label="Body Arc", linewidth=5)
+
             # Draw tip velocity arrow
             if tip_velocity is not None:
                 vel_scale = 0.1  # Scale factor for velocity arrow
@@ -407,6 +380,13 @@ class VLM:
             # Add text label for current position
             ax_3d.text(pos[0], pos[1], pos[2], f'  ({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})', 
                       fontsize=8, color='red', weight='bold')
+            
+            # Draw targets
+            for target_name, target_pos in self.targets.items():
+                ax_3d.scatter(target_pos[0], target_pos[1], target_pos[2], c=target_name, s=80, 
+                            label=f'{target_name} target', edgecolors='black', linewidth=1, zorder=4)
+                ax_3d.text(target_pos[0], target_pos[1], target_pos[2], f'({target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f})', 
+                          fontsize=8, color=target_name, weight='bold')
             
             if len(waypoints_3d) > 0:
                 ax_3d.scatter(waypoints_3d[:, 0], waypoints_3d[:, 1], waypoints_3d[:, 2], 
@@ -429,7 +409,7 @@ class VLM:
             ax_3d.set_xlim(self.xlim)
             ax_3d.set_ylim(self.ylim)
             ax_3d.set_zlim(self.zlim)
-            ax_3d.legend()
+            ax_3d.legend(loc='upper left', fontsize=8)
 
             plt.tight_layout()
             

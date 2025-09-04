@@ -67,23 +67,34 @@ if new_experiment:
         writer.writerow(csv_columns)
 
 # Colors range for detection
-# Yellow
+# Yellow - base
 lower_yellow = np.array([23, 88, 0])
 upper_yellow = np.array([36, 254, 255])
 
-# Red
+# Red - tip
 lower_red1 = np.array([0, 80, 0])
 upper_red1 = np.array([5, 255, 255])
 lower_red2 = np.array([172, 80, 0])
 upper_red2 = np.array([180, 255, 255])
 
-# Green
-lower_green = np.array([36, 50, 70])
-upper_green = np.array([86, 255, 255])
-
-# Blue
+# Blue - body
 lower_blue = np.array([100, 150, 0])
 upper_blue = np.array([140, 255, 255])
+
+# Green - target 1
+lower_green = np.array([88, 140, 0])
+upper_green = np.array([94, 255, 255])
+
+# Brown - target
+lower_brown1 = np.array([169, 47, 0])
+upper_brown1 = np.array([179, 115, 92])
+lower_brown2 = np.array([0, 47, 0])
+upper_brown2 = np.array([9, 115, 92])
+
+# Light blue - target
+lower_light_blue = np.array([94, 54, 119])
+upper_light_blue = np.array([104, 255, 255])
+
 
 # Move settings
 home_first = False
